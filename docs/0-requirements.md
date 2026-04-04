@@ -85,11 +85,29 @@ Li+ Desktop (アダプター層 + タスク層 + オペレーション層)
 
 - ライセンス: MIT（アプリ本体）、バンドルするLi+コンポーネントはApache-2.0帰属（NOTICEファイルで明示）
 - Windows + Linux対応必須。macOSは検証環境がないため優先度低
-- Linux版はWebインターフェース（ブラウザUI）での提供を理想とする
 - CLIのstdin/stdout/stderrを正しくパイプし、インタラクティブ操作を可能にする
 - 各エージェントの実行状態（起動中/停止中/エラー）をUI上で明示する
 - パスにスペースが含まれる環境での動作（CARGO_TARGET_DIR回避策が必要 — MinGWのdlltool/asがスペース入りパスを処理できない）
 - ペイン数は固定2から開始、将来的に可変ペイン対応
+
+## 配信形態
+
+### デュアルモードアーキテクチャ
+フロントエンド（Web UI）は共通。バックエンド（Rust）の配信方法で2モードを提供:
+
+1. **デスクトップモード** (Windows向け)
+   - Tauri v2: RustバックエンドがWebViewにフロントエンドを表示
+   - インストーラー配布（.exe, .msi）
+
+2. **Webモード** (Linux向け / クロスプラットフォーム)
+   - 同じRustバックエンドをHTTPサーバー + WebSocketで公開
+   - フロントエンドをブラウザで開く（localhost）
+   - Tauri不要、Rustバイナリ単体で動作
+
+共通部分:
+- フロントエンド: 同一のTypeScript + xterm.js コード
+- バックエンドロジック: 同一のRustコード（子プロセス管理、設定、暗号化）
+- 差分: Tauri APIの呼び出し部分のみ抽象化が必要
 
 ## 設定機能
 
@@ -115,9 +133,9 @@ Li+ Desktop (アダプター層 + タスク層 + オペレーション層)
 ## architecture
 
 ```
-Li+ Desktop (Tauri app)
-├── UI Layer (WebView / TypeScript)
-│   ├── マルチペインターミナル表示 (xterm.js)
+Li+ Desktop
+├── Frontend (共通 / TypeScript + Vite)
+│   ├── マルチペインターミナル表示 (xterm.js + WebSocket)
 │   ├── エージェント制御パネル（Start/Stop/切り替え）
 │   ├── 設定画面
 │   │   ├── エージェント設定（CLI起動コマンド）
@@ -125,21 +143,27 @@ Li+ Desktop (Tauri app)
 │   │   ├── ユーザープロフィール
 │   │   └── Character Instance設定
 │   ├── ペインの動的追加・削除（将来）
-│   └── GitHub統合ビュー（将来）
-├── App Layer (Rust / Tauri)
+│   ├── GitHub統合ビュー（将来）
+│   └── バックエンド通信の抽象化層（Tauri API / WebSocket 切り替え）
+│
+├── Backend (共通 / Rust)
 │   ├── 子プロセス管理（CLI spawn/kill/IO pipe）
 │   ├── 設定の永続化（暗号化対応）
-│   ├── キーストア連携
+│   ├── キーストア連携（OS標準）
 │   ├── Li+ アダプター層の実装（将来）
 │   ├── Li+ タスク層の実装（将来）
 │   └── Li+ オペレーション層の実装（将来）
+│
+├── 配信モード
+│   ├── Desktop: Tauri v2 (WebView) — Windows
+│   └── Web: HTTP + WebSocket サーバー — Linux / クロスプラットフォーム
+│
 ├── CLI Processes (子プロセス)
 │   ├── Claude Code CLI ← Li+core.md を注入
 │   ├── Codex CLI ← Li+core.md を注入
 │   ├── Gemini CLI ← Li+core.md を注入
 │   └── (設定追加で拡張可能)
-├── Web Interface (Linux向け / 将来)
-│   └── 同一フロントエンドをHTTPサーバーとして提供
+│
 └── External
     ├── GitHub API（issue/PR/commit = 外部メモリ + 判断ログ）
     └── 各AIサービス（サブスク認証はCLI側が保持）
