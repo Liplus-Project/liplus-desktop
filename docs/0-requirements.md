@@ -130,18 +130,40 @@ Li+ Desktop (アダプター層 + タスク層 + オペレーション層)
 - Li+のCharacter_Instance（名前、コンテキスト、表現スタイル）をUI上で編集可能
 - CLIに渡すLi+core.mdへの反映メカニズム
 
+## 拡張機能
+
+### MCP対応
+- MCPサーバーとの接続をサポート
+- スキル、プラグインは後回し — まずMCPプロトコル基盤のみ
+
+### 外部ツール連携
+- VS Codeを外部エディタとして起動可能（Claude Desktop, Codexと同様の選択メニュー）
+- プレビュー用途、コード編集用途
+- 設定で外部ツールのパスをカスタマイズ可能
+
+### 内蔵ターミナル
+- AIエージェントペインとは別に、ユーザー用の汎用ターミナルペインを提供
+- git操作、ファイル確認、ビルド実行などの補助作業用
+
+### 認証
+- ユーザー認証は各CLI任せ（Li+ Desktopは介入しない）
+- CLI側のログインフロー（OAuth等）はターミナルペイン内で完結
+
 ## architecture
 
 ```
 Li+ Desktop
 ├── Frontend (共通 / TypeScript + Vite)
 │   ├── マルチペインターミナル表示 (xterm.js + WebSocket)
+│   │   ├── AIエージェントペイン（Claude Code / Codex / Gemini）
+│   │   └── ユーザーターミナルペイン（汎用シェル）
 │   ├── エージェント制御パネル（Start/Stop/切り替え）
 │   ├── 設定画面
 │   │   ├── エージェント設定（CLI起動コマンド）
 │   │   ├── APIキー管理（暗号化保存）
 │   │   ├── ユーザープロフィール
-│   │   └── Character Instance設定
+│   │   ├── Character Instance設定
+│   │   └── 外部ツール設定（VS Code等のパス）
 │   ├── ペインの動的追加・削除（将来）
 │   ├── GitHub統合ビュー（将来）
 │   └── バックエンド通信の抽象化層（Tauri API / WebSocket 切り替え）
@@ -150,6 +172,8 @@ Li+ Desktop
 │   ├── 子プロセス管理（CLI spawn/kill/IO pipe）
 │   ├── 設定の永続化（暗号化対応）
 │   ├── キーストア連携（OS標準）
+│   ├── MCP クライアント（将来）
+│   ├── 外部ツール起動（VS Code等）
 │   ├── Li+ アダプター層の実装（将来）
 │   ├── Li+ タスク層の実装（将来）
 │   └── Li+ オペレーション層の実装（将来）
@@ -190,9 +214,12 @@ Li+ Desktop
 - Character Instance設定UI
 - 設定の永続化
 - Li+core.md バンドル・注入メカニズム
+- MCP対応
+- 外部ツール連携（VS Code起動等）
+- ユーザー用汎用ターミナルペイン
 - GitHub統合
 - Li+各層のUI側実装
 - CI/CD（GitHub Actions）
 - エラーハンドリング・プロセス再起動
-- Linux対応（Webインターフェース）
+- Webモード（HTTP + WebSocket）
 - Li+config.md / CLAUDE.md（このリポジトリ用）
