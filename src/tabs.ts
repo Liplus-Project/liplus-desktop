@@ -131,13 +131,24 @@ export class TabManager {
     }
 
     const { command, args, cwd, cli_kind } = state.config;
+
+    // Inject stream-json flags based on CLI kind
+    let streamArgs: string[];
+    if (cli_kind === "claude") {
+      streamArgs = ["--print", "--output-format", "stream-json", "--verbose", ...args];
+    } else if (cli_kind === "codex") {
+      streamArgs = ["exec", "--json", ...args];
+    } else {
+      streamArgs = [...args];
+    }
+
     state.chat.clear();
     state.chat.appendStatusBanner(`Starting ${command}...`);
 
     try {
       const id = await invoke<string>("spawn_stream_pty", {
         command,
-        args,
+        args: streamArgs,
         cols: 120,
         rows: 40,
         cwd: cwd ?? null,
