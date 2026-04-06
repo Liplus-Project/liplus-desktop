@@ -18,6 +18,31 @@ pub struct AppConfig {
     pub tabs: Vec<TabConfig>,
 }
 
+// ---------------------------------------------------------------------------
+// Session persistence types
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SavedChatMessage {
+    pub role: String,
+    pub content_type: String,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionData {
+    pub id: String,
+    pub name: String,
+    pub messages: Vec<SavedChatMessage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TabSessions {
+    pub tab_id: String,
+    pub active_session_id: Option<String>,
+    pub sessions: Vec<SessionData>,
+}
+
 /// Legacy config format for migration
 #[derive(Debug, Clone, Deserialize)]
 struct LegacyPaneConfig {
@@ -130,4 +155,39 @@ pub fn save_config(app: AppHandle, config: AppConfig) -> Result<(), String> {
     let content = serde_json::to_string_pretty(&config)
         .map_err(|e| format!("Failed to serialize config: {e}"))?;
     std::fs::write(&path, content).map_err(|e| format!("Failed to write config: {e}"))
+}
+
+// ---------------------------------------------------------------------------
+// Session persistence commands
+// ---------------------------------------------------------------------------
+
+fn sessions_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to resolve app data dir: {e}"))?;
+    Ok(dir.join("sessions.json"))
+}
+
+#[tauri::command]
+pub fn save_sessions(app: AppHandle, data: Vec<TabSessions>) -> Result<(), String> {
+    let path = sessions_path(&app)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create sessions dir: {e}"))?;
+    }
+    let content = serde_json::to_string_pretty(&data)
+        .map_err(|e| format!("Failed to serialize sessions: {e}"))?;
+    std::fs::write(&path, content).map_err(|e| format!("Failed to write sessions: {e}"))
+}
+
+#[tauri::command]
+pub fn load_sessions(app: AppHandle) -> Result<Vec<TabSessions>, String> {
+    let path = sessions_path(&app)?;
+    if !path.exists() {
+        return Ok(vec![]);
+    }
+    let content =
+        std::fs::read_to_string(&path).map_err(|e| format!("Failed to read sessions: {e}"))?;
+    serde_json::from_str(&content).map_err(|e| format!("Failed to parse sessions: {e}"))
 }
