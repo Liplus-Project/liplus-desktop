@@ -135,7 +135,7 @@ export class TabManager {
     // Inject stream-json flags based on CLI kind
     let streamArgs: string[];
     if (cli_kind === "claude") {
-      streamArgs = ["--print", "--output-format", "stream-json", "--verbose", ...args];
+      streamArgs = ["--print", "--output-format", "stream-json", "--input-format", "stream-json", "--verbose", ...args];
     } else if (cli_kind === "codex") {
       streamArgs = ["exec", "--json", ...args];
     } else {
