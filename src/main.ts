@@ -1,5 +1,6 @@
 import "./styles.css";
 import { TabManager, AppConfig } from "./tabs";
+import { saveAllSessions } from "./sessions";
 import { invoke } from "@tauri-apps/api/core";
 
 function closeSettingsModal() {
@@ -20,6 +21,15 @@ window.addEventListener("DOMContentLoaded", async () => {
     } catch (e) {
       console.error("Failed to save config:", e);
     }
+  };
+
+  // Persist sessions on change (debounced)
+  let sessionSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  manager.onSessionsChange = () => {
+    if (sessionSaveTimer) clearTimeout(sessionSaveTimer);
+    sessionSaveTimer = setTimeout(() => {
+      saveAllSessions(manager.getSessionManagers());
+    }, 500);
   };
 
   // Load persisted config (falls back to defaults on first run)
@@ -50,7 +60,7 @@ window.addEventListener("DOMContentLoaded", async () => {
     };
   }
 
-  manager.loadTabs(appConfig);
+  await manager.loadTabs(appConfig);
 
   // Modal button handlers
   document
