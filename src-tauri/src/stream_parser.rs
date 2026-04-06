@@ -12,14 +12,71 @@ pub enum CliKind {
 // Common layer: NDJSON line parser
 // ---------------------------------------------------------------------------
 
+/// Strip ANSI escape sequences from a string.
+/// Handles CSI sequences (\x1b[...X), OSC sequences (\x1b]...ST), and simple escapes (\x1bX).
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            match chars.peek() {
+                Some('[') => {
+                    chars.next(); // consume '['
+                    // CSI: skip until 0x40..0x7E
+                    while let Some(&ch) = chars.peek() {
+                        chars.next();
+                        if ('\x40'..='\x7e').contains(&ch) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    chars.next(); // consume ']'
+                    // OSC: skip until BEL or ST (\x1b\\)
+                    while let Some(&ch) = chars.peek() {
+                        chars.next();
+                        if ch == '\x07' {
+                            break;
+                        }
+                        if ch == '\x1b' {
+                            if chars.peek() == Some(&'\\') {
+                                chars.next();
+                            }
+                            break;
+                        }
+                    }
+                }
+                _ => {
+                    // Simple escape: skip one character
+                    chars.next();
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// Parse a single line of NDJSON into a serde_json::Value.
-/// Returns None for blank lines or lines that fail to parse (e.g. ANSI noise).
+/// Strips ANSI escape sequences before parsing.
+/// Returns None for blank lines or lines that fail to parse.
 pub fn parse_ndjson_line(line: &str) -> Option<Value> {
     let trimmed = line.trim();
     if trimmed.is_empty() {
         return None;
     }
-    serde_json::from_str(trimmed).ok()
+    // Fast path: try parsing directly first (no ANSI)
+    if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
+        return Some(v);
+    }
+    // Slow path: strip ANSI escapes and retry
+    let cleaned = strip_ansi(trimmed);
+    let cleaned = cleaned.trim();
+    if cleaned.is_empty() {
+        return None;
+    }
+    serde_json::from_str(cleaned).ok()
 }
 
 // ---------------------------------------------------------------------------
