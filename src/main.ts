@@ -26,6 +26,21 @@ interface PaneState {
 
 const panes: Record<string, PaneState> = {};
 
+type AgentStatus = "stopped" | "running" | "error";
+
+function setStatus(paneId: string, status: AgentStatus) {
+  const badge = document.getElementById(`status-${paneId}`);
+  if (!badge) return;
+  badge.className = `status-badge status-${status}`;
+  badge.textContent = status.charAt(0).toUpperCase() + status.slice(1);
+
+  // Update button disabled states
+  const startBtn = document.querySelector(`.pane-btn[data-action="start"][data-pane="${paneId}"]`) as HTMLButtonElement | null;
+  const stopBtn = document.querySelector(`.pane-btn[data-action="stop"][data-pane="${paneId}"]`) as HTMLButtonElement | null;
+  if (startBtn) startBtn.disabled = status === "running";
+  if (stopBtn) stopBtn.disabled = status !== "running";
+}
+
 // Currently open settings modal target
 let settingsTargetPane: string | null = null;
 
@@ -75,15 +90,23 @@ async function startProcess(paneId: string) {
     });
 
     pane.ptyId = id;
+    setStatus(paneId, "running");
 
     // Listen for PTY output
     pane.unlistenData = await listen<string>(`pty-data-${id}`, (event) => {
       pane.terminal.write(event.payload);
     });
 
-    // Listen for PTY exit
-    pane.unlistenExit = await listen<null>(`pty-exit-${id}`, () => {
-      pane.terminal.writeln("\r\n\x1b[33m[Process exited]\x1b[0m");
+    // Listen for PTY exit (payload is exit code or null)
+    pane.unlistenExit = await listen<number | null>(`pty-exit-${id}`, (event) => {
+      const code = event.payload;
+      if (code !== null && code !== 0) {
+        pane.terminal.writeln(`\r\n\x1b[31m[Exited with code ${code}]\x1b[0m`);
+        setStatus(paneId, "error");
+      } else {
+        pane.terminal.writeln("\r\n\x1b[33m[Process exited]\x1b[0m");
+        setStatus(paneId, "stopped");
+      }
       cleanupPane(paneId);
     });
 
@@ -116,6 +139,7 @@ async function startProcess(paneId: string) {
     });
   } catch (e) {
     pane.terminal.writeln(`\r\n\x1b[31m[Failed to start: ${e}]\x1b[0m`);
+    setStatus(paneId, "error");
   }
 }
 
@@ -140,6 +164,7 @@ async function stopProcess(paneId: string) {
   try {
     await invoke("kill_pty", { id });
     pane.terminal.writeln("\r\n\x1b[33m[Stopped]\x1b[0m");
+    setStatus(paneId, "stopped");
   } catch (e) {
     pane.terminal.writeln(`\r\n\x1b[31m[Stop failed: ${e}]\x1b[0m`);
   }
@@ -261,6 +286,10 @@ window.addEventListener("DOMContentLoaded", async () => {
 
   panes["right"].terminal.writeln("\x1b[36mLi+ Desktop — Codex pane\x1b[0m");
   panes["right"].terminal.writeln("Press \x1b[32mStart\x1b[0m to launch Codex CLI.\r\n");
+
+  // Set initial button states
+  setStatus("left", "stopped");
+  setStatus("right", "stopped");
 
   // Pane button handlers
   document.querySelectorAll(".pane-btn").forEach((btn) => {

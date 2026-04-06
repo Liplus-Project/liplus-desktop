@@ -90,6 +90,33 @@ UI:
 - Save で `save_config` を呼び出し永続化
 - 設定は次回 Start 時に反映（実行中プロセスには影響しない）
 
+## ビルド手順
+
+### 前提条件
+
+- Rust ツールチェーン（`rustup`）
+- Node.js + npm
+- MinGW binutils（`as.exe`, `dlltool.exe`）— `~/.local/mingw64/bin` が PATH に含まれていること
+
+### パスにスペースが含まれる環境（Windows デフォルトユーザー名等）
+
+MinGW binutils はビルド成果物のパスにスペースがあるとリンクエラーを起こす。
+`src-tauri/.cargo/config.toml.example` をコピーして設定する:
+
+```sh
+cp src-tauri/.cargo/config.toml.example src-tauri/.cargo/config.toml
+# 必要に応じて target-dir のパスを編集する
+```
+
+`src-tauri/.cargo/config.toml` はマシン固有のファイルであり `.gitignore` に登録済み。コミットしないこと。
+
+### ビルド
+
+```sh
+npm install
+npm run tauri build
+```
+
 ## MVP status (v0.1.0-dev)
 
 現在実装済み:
