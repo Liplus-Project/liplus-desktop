@@ -1,4 +1,5 @@
 import { ChatPane } from "./chat";
+import { SessionManager, loadAllSessions } from "./sessions";
 import { invoke } from "@tauri-apps/api/core";
 
 // ---------------------------------------------------------------------------
@@ -27,6 +28,7 @@ export type AgentStatus = "stopped" | "running" | "error";
 interface TabState {
   config: TabConfig;
   chat: ChatPane;
+  sessionMgr: SessionManager;
   containerEl: HTMLElement;
   tabEl: HTMLElement;
   status: AgentStatus;
@@ -42,9 +44,12 @@ export class TabManager {
   private tabBarEl: HTMLElement;
   private contentAreaEl: HTMLElement;
   private nextTabNum = 1;
+  private sessionManagers: Map<string, SessionManager> = new Map();
 
   /** Callback when config changes (for persistence). */
   onConfigChange: ((config: AppConfig) => void) | null = null;
+  /** Callback when session data changes (for persistence). */
+  onSessionsChange: (() => void) | null = null;
 
   constructor(tabBarEl: HTMLElement, contentAreaEl: HTMLElement) {
     this.tabBarEl = tabBarEl;
@@ -63,8 +68,8 @@ export class TabManager {
   // Public API
   // -----------------------------------------------------------------------
 
-  /** Load tabs from persisted config. */
-  loadTabs(config: AppConfig): void {
+  /** Load tabs from persisted config, then restore sessions. */
+  async loadTabs(config: AppConfig): Promise<void> {
     for (const tabCfg of config.tabs) {
       this.createTab(tabCfg, false);
     }
@@ -80,6 +85,25 @@ export class TabManager {
       })
       .filter((n) => n > 0);
     this.nextTabNum = nums.length > 0 ? Math.max(...nums) + 1 : 1;
+
+    // Restore session data
+    const allSessions = await loadAllSessions();
+    for (const tabSessions of allSessions) {
+      const mgr = this.sessionManagers.get(tabSessions.tab_id);
+      if (mgr) {
+        mgr.importData(tabSessions);
+      }
+    }
+
+    // Ensure each tab has at least one session
+    for (const [, mgr] of this.sessionManagers) {
+      mgr.ensureDefaultSession();
+    }
+  }
+
+  /** Get all session managers (for persistence). */
+  getSessionManagers(): Map<string, SessionManager> {
+    return this.sessionManagers;
   }
 
   /** Get the current config for persistence. */
@@ -152,18 +176,32 @@ export class TabManager {
   // -----------------------------------------------------------------------
 
   private createTab(cfg: TabConfig, activate: boolean): void {
-    // Chat container (hidden by default)
+    // Tab content wrapper (hidden by default) — flex row for sidebar + chat
     const containerEl = document.createElement("div");
     containerEl.className = "tab-content";
     containerEl.dataset.tabId = cfg.id;
     containerEl.style.display = "none";
     this.contentAreaEl.appendChild(containerEl);
 
-    // ChatPane builds its DOM inside the container
-    const chat = new ChatPane(containerEl);
+    // Chat area (right side of the flex row)
+    const chatArea = document.createElement("div");
+    chatArea.className = "tab-chat-area";
+    containerEl.appendChild(chatArea);
+
+    // ChatPane builds its DOM inside the chat area
+    const chat = new ChatPane(chatArea);
     chat.appendStatusBanner(
       `Li+ Desktop \u2014 ${cfg.name} tab. Press Start to launch.`,
     );
+
+    // SessionManager builds sidebar and inserts it before chatArea in the container
+    const sessionMgr = new SessionManager(cfg.id, chat, containerEl);
+    sessionMgr.onSessionsChange = () => {
+      if (this.onSessionsChange) {
+        this.onSessionsChange();
+      }
+    };
+    this.sessionManagers.set(cfg.id, sessionMgr);
 
     // Tab bar item
     const tabEl = document.createElement("div");
@@ -229,6 +267,7 @@ export class TabManager {
     this.tabs.set(cfg.id, {
       config: cfg,
       chat,
+      sessionMgr,
       containerEl,
       tabEl,
       status: "stopped",
@@ -276,10 +315,11 @@ export class TabManager {
       state.chat.detach();
     }
 
-    // Remove DOM
+    // Remove DOM and session manager
     state.tabEl.remove();
     state.containerEl.remove();
     this.tabs.delete(tabId);
+    this.sessionManagers.delete(tabId);
 
     // If the closed tab was active, switch to the first remaining
     if (this.activeTabId === tabId) {

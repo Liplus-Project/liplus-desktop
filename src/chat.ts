@@ -20,6 +20,13 @@ interface ChatMessage {
 // ChatPane — one chat UI instance
 // ---------------------------------------------------------------------------
 
+/** Serializable message for persistence. */
+export interface SavedChatMessage {
+  role: Role;
+  content_type: ContentType;
+  body: string;
+}
+
 export class ChatPane {
   private container: HTMLElement;
   private messagesEl: HTMLElement;
@@ -28,6 +35,8 @@ export class ChatPane {
   private ptyId: string | null = null;
   private unlistenChat: UnlistenFn | null = null;
   private unlistenExit: UnlistenFn | null = null;
+  /** Callback when user sends a message (for auto-naming). */
+  onUserMessage: ((text: string) => void) | null = null;
   /** Whether user has scrolled up (disables auto-scroll) */
   private userScrolled = false;
   /** Element for the currently streaming assistant message (appended incrementally) */
@@ -36,6 +45,9 @@ export class ChatPane {
   private streamingBody = "";
   /** Content type of the current streaming message */
   private streamingType: ContentType | null = null;
+  /** Message history for persistence (capped at MAX_MESSAGES) */
+  private messageHistory: SavedChatMessage[] = [];
+  private static readonly MAX_MESSAGES = 1000;
 
   /**
    * @param containerOrId - Either an HTMLElement to use as the container,
@@ -148,12 +160,13 @@ export class ChatPane {
     }
   }
 
-  /** Clear all messages. */
+  /** Clear all messages and history. */
   clear(): void {
     this.messagesEl.innerHTML = "";
     this.streamingBubble = null;
     this.streamingBody = "";
     this.streamingType = null;
+    this.messageHistory = [];
   }
 
   /** Show an informational banner (e.g. welcome text). */
@@ -168,6 +181,36 @@ export class ChatPane {
   /** Get the current PTY id (null if not attached). */
   getPtyId(): string | null {
     return this.ptyId;
+  }
+
+  /** Get accumulated message history for persistence. */
+  getMessages(): SavedChatMessage[] {
+    return [...this.messageHistory];
+  }
+
+  /** Restore messages from persistence — rebuilds the DOM. */
+  setMessages(msgs: SavedChatMessage[]): void {
+    this.clear();
+    this.messageHistory = msgs.slice(-ChatPane.MAX_MESSAGES);
+    for (const m of this.messageHistory) {
+      const msg: ChatMessage = { role: m.role, content_type: m.content_type, body: m.body };
+      switch (msg.content_type) {
+        case "tool_use":
+          this.appendToolUse(msg);
+          break;
+        case "tool_result":
+          this.appendToolResult(msg);
+          break;
+        case "status":
+          this.appendStatusBanner(msg.body);
+          break;
+        default:
+          this.appendBubble(msg);
+      }
+    }
+    // Scroll to bottom after restore
+    this.userScrolled = false;
+    this.scrollToBottom();
   }
 
   // -----------------------------------------------------------------------
@@ -200,6 +243,8 @@ export class ChatPane {
     // Non-streaming message — finalize any ongoing stream first
     this.finalizeStreaming();
 
+    this.pushHistory({ role: msg.role, content_type: msg.content_type, body: msg.body });
+
     switch (msg.content_type) {
       case "tool_use":
         this.appendToolUse(msg);
@@ -216,9 +261,10 @@ export class ChatPane {
   }
 
   private finalizeStreaming(): void {
-    if (this.streamingBubble) {
+    if (this.streamingBubble && this.streamingType && this.streamingBody) {
       // Final render with complete body
       this.updateStreamingBubble();
+      this.pushHistory({ role: "assistant", content_type: this.streamingType, body: this.streamingBody });
     }
     this.streamingBubble = null;
     this.streamingBody = "";
@@ -327,11 +373,13 @@ export class ChatPane {
     if (!text || !this.ptyId) return;
 
     // Display user message as a bubble
-    this.appendBubble({
-      role: "user",
-      content_type: "text",
-      body: text,
-    });
+    const userMsg: ChatMessage = { role: "user", content_type: "text", body: text };
+    this.pushHistory({ role: "user", content_type: "text", body: text });
+    this.appendBubble(userMsg);
+
+    if (this.onUserMessage) {
+      this.onUserMessage(text);
+    }
 
     // Send to PTY stdin as a line
     try {
@@ -342,6 +390,17 @@ export class ChatPane {
 
     this.textareaEl.value = "";
     this.textareaEl.style.height = "auto";
+  }
+
+  // -----------------------------------------------------------------------
+  // History tracking
+  // -----------------------------------------------------------------------
+
+  private pushHistory(msg: SavedChatMessage): void {
+    this.messageHistory.push(msg);
+    if (this.messageHistory.length > ChatPane.MAX_MESSAGES) {
+      this.messageHistory = this.messageHistory.slice(-ChatPane.MAX_MESSAGES);
+    }
   }
 
   // -----------------------------------------------------------------------
