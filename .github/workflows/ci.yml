@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+
+      - name: Set GNU as default host
+        run: rustup set default-host x86_64-pc-windows-gnu
+
+      - run: npm ci
+
+      - name: Build Tauri app
+        run: npm run tauri build
+
+  # Gate job: single Required status check for branch protection.
+  # Add new jobs to `needs` when CI grows. No Settings change needed.
+  CI:
+    if: always()
+    needs: [build]
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          if [[ "${{ needs.build.result }}" != "success" ]]; then
+            echo "CI failed: build=${{ needs.build.result }}"
+            exit 1
+          fi
