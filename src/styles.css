@@ -98,6 +98,45 @@
   height: 100%;
 }
 
+/* Status badge */
+.status-badge {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 7px;
+  border-radius: 8px;
+  letter-spacing: 0.03em;
+  user-select: none;
+}
+
+.status-stopped {
+  background: #2a2a3a;
+  color: #6b7280;
+  border: 1px solid #3a3a4a;
+}
+
+.status-running {
+  background: #0d2b1a;
+  color: #34d399;
+  border: 1px solid #065f46;
+}
+
+.status-error {
+  background: #2b0d0d;
+  color: #f87171;
+  border: 1px solid #7f1d1d;
+}
+
+/* Disabled button state */
+.pane-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.pane-btn:disabled:hover {
+  background: #1a1a2e;
+  color: #a8b2d1;
+}
+
 /* Settings button */
 .pane-settings-btn {
   padding: 2px 7px;
