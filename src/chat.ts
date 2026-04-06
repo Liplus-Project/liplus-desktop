@@ -17,7 +17,7 @@ interface ChatMessage {
 }
 
 // ---------------------------------------------------------------------------
-// ChatPane — one chat UI instance (left or right pane)
+// ChatPane — one chat UI instance
 // ---------------------------------------------------------------------------
 
 export class ChatPane {
@@ -37,8 +37,17 @@ export class ChatPane {
   /** Content type of the current streaming message */
   private streamingType: ContentType | null = null;
 
-  constructor(containerId: string) {
-    this.container = document.getElementById(containerId)!;
+  /**
+   * @param containerOrId - Either an HTMLElement to use as the container,
+   *   or a string element ID (legacy support).
+   */
+  constructor(containerOrId: HTMLElement | string) {
+    if (typeof containerOrId === "string") {
+      this.container = document.getElementById(containerOrId)!;
+    } else {
+      this.container = containerOrId;
+    }
+    this.container.classList.add("chat-container");
 
     // Build DOM structure
     this.messagesEl = document.createElement("div");
@@ -94,8 +103,11 @@ export class ChatPane {
   // Public API
   // -----------------------------------------------------------------------
 
-  /** Attach to a running PTY session — start listening for chat-message events. */
-  async attach(ptyId: string): Promise<void> {
+  /**
+   * Attach to a running PTY session — start listening for chat-message events.
+   * @param onExit - Optional callback invoked when the PTY process exits.
+   */
+  async attach(ptyId: string, onExit?: () => void): Promise<void> {
     this.ptyId = ptyId;
     this.sendBtn.disabled = false;
 
@@ -116,6 +128,7 @@ export class ChatPane {
             : "Process exited",
         );
         this.detach();
+        if (onExit) onExit();
       },
     );
   }
