@@ -95,6 +95,7 @@ pub fn spawn_pty(
     let app_clone = app.clone();
 
     // Spawn background thread to read PTY output and emit events
+    let ptys_clone = Arc::clone(&state.ptys);
     std::thread::spawn(move || {
         let mut buf = [0u8; 4096];
         loop {
@@ -107,8 +108,17 @@ pub fn spawn_pty(
                 Err(_) => break,
             }
         }
-        // Emit exit event when reader closes
-        let _ = app_clone.emit(&format!("pty-exit-{}", id_clone), ());
+        // Collect exit code before emitting exit event
+        let exit_code: Option<u32> = {
+            let mut map = ptys_clone.lock();
+            if let Some(pty) = map.get_mut(&id_clone) {
+                pty.child.wait().ok().map(|status| status.exit_code())
+            } else {
+                None
+            }
+        };
+        // Emit exit event with exit code payload (None if killed by signal/unknown)
+        let _ = app_clone.emit(&format!("pty-exit-{}", id_clone), exit_code);
     });
 
     state.ptys.lock().insert(
