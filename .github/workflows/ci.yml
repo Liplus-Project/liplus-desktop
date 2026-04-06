@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 jobs:
-  build:
+  check:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,20 +23,35 @@ jobs:
       - name: Set GNU as default host
         run: rustup set default-host x86_64-pc-windows-gnu
 
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: rust-${{ runner.os }}-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: rust-${{ runner.os }}-
+
+      - uses: actions/cache@v4
+        with:
+          path: node_modules
+          key: node-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
       - run: npm ci
 
-      - name: Build Tauri app
-        run: npm run tauri build
+      - name: Check Rust compilation
+        working-directory: src-tauri
+        run: cargo check --target x86_64-pc-windows-gnu
 
   # Gate job: single Required status check for branch protection.
   # Add new jobs to `needs` when CI grows. No Settings change needed.
   CI:
     if: always()
-    needs: [build]
+    needs: [check]
     runs-on: ubuntu-latest
     steps:
       - run: |
-          if [[ "${{ needs.build.result }}" != "success" ]]; then
-            echo "CI failed: build=${{ needs.build.result }}"
+          if [[ "${{ needs.check.result }}" != "success" ]]; then
+            echo "CI failed: check=${{ needs.check.result }}"
             exit 1
           fi

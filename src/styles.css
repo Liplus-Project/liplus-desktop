@@ -97,3 +97,140 @@
 .terminal-container .xterm {
   height: 100%;
 }
+
+/* Settings button */
+.pane-settings-btn {
+  padding: 2px 7px;
+  font-size: 13px;
+  color: #64ffda;
+  border-color: #1e3a5f;
+}
+
+.pane-settings-btn:hover {
+  background: #0f3460;
+  color: #64ffda;
+}
+
+/* Modal */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.modal-box {
+  background: #16213e;
+  border: 1px solid #0f3460;
+  border-radius: 6px;
+  width: 360px;
+  display: flex;
+  flex-direction: column;
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  padding: 10px 14px;
+  border-bottom: 1px solid #0f3460;
+}
+
+.modal-title {
+  flex: 1;
+  font-weight: 600;
+  font-size: 13px;
+  color: #64ffda;
+}
+
+.modal-close-btn {
+  background: none;
+  border: none;
+  color: #a8b2d1;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 0 4px;
+}
+
+.modal-close-btn:hover {
+  color: #e0e0e0;
+}
+
+.modal-body {
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.modal-label {
+  font-size: 11px;
+  color: #a8b2d1;
+  margin-top: 6px;
+}
+
+.modal-label:first-child {
+  margin-top: 0;
+}
+
+.modal-hint {
+  color: #4a5568;
+  font-size: 10px;
+}
+
+.modal-input {
+  background: #0a0a1a;
+  border: 1px solid #0f3460;
+  border-radius: 4px;
+  color: #e0e0e0;
+  font-size: 12px;
+  padding: 5px 8px;
+  outline: none;
+  width: 100%;
+}
+
+.modal-input:focus {
+  border-color: #64ffda;
+}
+
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 14px;
+  border-top: 1px solid #0f3460;
+}
+
+.modal-save-btn {
+  background: #0f3460;
+  border: 1px solid #64ffda;
+  border-radius: 4px;
+  color: #64ffda;
+  font-size: 12px;
+  padding: 4px 16px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.modal-save-btn:hover {
+  background: #64ffda;
+  color: #0a0a1a;
+}
+
+.modal-cancel-btn {
+  background: none;
+  border: 1px solid #0f3460;
+  border-radius: 4px;
+  color: #a8b2d1;
+  font-size: 12px;
+  padding: 4px 16px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.modal-cancel-btn:hover {
+  background: #0f3460;
+  color: #e0e0e0;
+}
