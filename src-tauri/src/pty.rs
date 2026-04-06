@@ -49,10 +49,23 @@ pub fn spawn_pty(
         .openpty(size)
         .map_err(|e| format!("Failed to open PTY: {e}"))?;
 
-    let mut cmd = CommandBuilder::new(&command);
-    for arg in &args {
-        cmd.arg(arg);
-    }
+    // On Windows, .cmd/.bat scripts (like npm-installed CLIs) cannot be spawned directly.
+    // Wrap them with cmd.exe /C so Windows resolves the command via PATH and PATHEXT.
+    let mut cmd = if cfg!(windows) {
+        let mut c = CommandBuilder::new("cmd.exe");
+        c.arg("/C");
+        c.arg(&command);
+        for arg in &args {
+            c.arg(arg);
+        }
+        c
+    } else {
+        let mut c = CommandBuilder::new(&command);
+        for arg in &args {
+            c.arg(arg);
+        }
+        c
+    };
 
     // Spawn the child process in the PTY
     let child = pair

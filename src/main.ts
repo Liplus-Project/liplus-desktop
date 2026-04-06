@@ -78,6 +78,20 @@ async function startProcess(paneId: string) {
       }
     });
 
+    // Enable Ctrl+V paste from clipboard
+    pane.terminal.attachCustomKeyEventHandler((e: KeyboardEvent) => {
+      if (e.type === "keydown" && e.ctrlKey && e.key === "v") {
+        navigator.clipboard.readText().then((text) => {
+          if (pane.ptyId && text) {
+            invoke("write_pty", { id: pane.ptyId, data: text }).catch(() => {});
+          }
+        });
+        return false; // prevent xterm default handling
+      }
+      // Ctrl+C: let xterm handle it (sends SIGINT via PTY)
+      return true;
+    });
+
     // Forward terminal resize to PTY
     pane.terminal.onResize(({ cols, rows }) => {
       if (pane.ptyId) {
