@@ -47,21 +47,18 @@ pub fn load_config(app: AppHandle) -> Result<AppConfig, String> {
     if !path.exists() {
         return Ok(AppConfig::default());
     }
-    let content = std::fs::read_to_string(&path)
-        .map_err(|e| format!("Failed to read config: {e}"))?;
-    serde_json::from_str(&content)
-        .map_err(|e| format!("Failed to parse config: {e}"))
+    let content =
+        std::fs::read_to_string(&path).map_err(|e| format!("Failed to read config: {e}"))?;
+    serde_json::from_str(&content).map_err(|e| format!("Failed to parse config: {e}"))
 }
 
 #[tauri::command]
 pub fn save_config(app: AppHandle, config: AppConfig) -> Result<(), String> {
     let path = config_path(&app)?;
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create config dir: {e}"))?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("Failed to create config dir: {e}"))?;
     }
     let content = serde_json::to_string_pretty(&config)
         .map_err(|e| format!("Failed to serialize config: {e}"))?;
-    std::fs::write(&path, content)
-        .map_err(|e| format!("Failed to write config: {e}"))
+    std::fs::write(&path, content).map_err(|e| format!("Failed to write config: {e}"))
 }
