@@ -35,6 +35,7 @@ pub fn spawn_pty(
     args: Vec<String>,
     cols: u16,
     rows: u16,
+    cwd: Option<String>,
 ) -> Result<String, String> {
     let pty_system = NativePtySystem::default();
 
@@ -66,6 +67,10 @@ pub fn spawn_pty(
         }
         c
     };
+
+    if let Some(dir) = cwd {
+        cmd.cwd(dir);
+    }
 
     // Spawn the child process in the PTY
     let child = pair

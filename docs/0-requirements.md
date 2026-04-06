@@ -57,14 +57,38 @@ Li+ Desktop (Tauri app)
 ```
 
 Tauri コマンド（Rust 側に実装）:
-- `spawn_pty(command, args, cols, rows)` → PTY ID（UUID文字列）を返す
+- `spawn_pty(command, args, cols, rows, cwd?)` → PTY ID（UUID文字列）を返す
 - `write_pty(id, data)` → PTY stdin に送信
 - `resize_pty(id, cols, rows)` → PTY をリサイズ
 - `kill_pty(id)` → PTY プロセスを終了
+- `load_config()` → `AppConfig` を返す（ファイルが存在しない場合はデフォルト値）
+- `save_config(config)` → `AppConfig` を JSON ファイルに保存
 
 Tauri イベント（Rust → フロントエンド）:
 - `pty-data-{id}` → PTY 出力データ（文字列）
 - `pty-exit-{id}` → PTY プロセス終了通知
+
+### 設定システム
+
+各ペインの CLI コマンド・引数・作業ディレクトリをユーザーが自由に設定できる。
+
+設定ファイル:
+- 保存先: `AppData/Roaming/com.liplus.desktop/config.json`
+- 形式: JSON
+
+設定スキーマ:
+```json
+{
+  "left":  { "command": "claude", "args": [], "cwd": null },
+  "right": { "command": "codex",  "args": [], "cwd": null }
+}
+```
+
+UI:
+- 各ペインのヘッダーに `⚙` ボタンを配置
+- クリックでモーダルを表示（Command / Args / Working Directory）
+- Save で `save_config` を呼び出し永続化
+- 設定は次回 Start 時に反映（実行中プロセスには影響しない）
 
 ## MVP status (v0.1.0-dev)
 
@@ -79,9 +103,11 @@ Tauri イベント（Rust → フロントエンド）:
 
 未実装:
 - 実際のCLI（claude, codex）との接続テスト（ConPTY 上での動作検証）
-- エージェント設定UI
 - Li+core.md バンドル・注入
 - GitHub統合
 - Li+各層のUI側実装
 - CI/CD
 - エラーハンドリング・再接続
+
+実装済み（v0.1.0-dev 追加分）:
+- エージェント設定UI（コマンド・引数・作業ディレクトリの設定・永続化）

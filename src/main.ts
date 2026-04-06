@@ -4,16 +4,30 @@ import "@xterm/xterm/css/xterm.css";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
 
+interface PaneConfig {
+  command: string;
+  args: string[];
+  cwd: string | null;
+}
+
+interface AppConfig {
+  left: PaneConfig;
+  right: PaneConfig;
+}
+
 interface PaneState {
   terminal: Terminal;
   fitAddon: FitAddon;
   ptyId: string | null;
-  command: string;
+  config: PaneConfig;
   unlistenData: UnlistenFn | null;
   unlistenExit: UnlistenFn | null;
 }
 
 const panes: Record<string, PaneState> = {};
+
+// Currently open settings modal target
+let settingsTargetPane: string | null = null;
 
 function createTerminal(containerId: string): { terminal: Terminal; fitAddon: FitAddon } {
   const container = document.getElementById(containerId)!;
@@ -44,7 +58,8 @@ async function startProcess(paneId: string) {
     return;
   }
 
-  pane.terminal.writeln(`\x1b[36m[Starting ${pane.command}...]\x1b[0m`);
+  const { command, args, cwd } = pane.config;
+  pane.terminal.writeln(`\x1b[36m[Starting ${command}...]\x1b[0m`);
 
   try {
     const dims = pane.fitAddon.proposeDimensions() ?? { cols: 80, rows: 24 };
@@ -52,10 +67,11 @@ async function startProcess(paneId: string) {
     const rows = dims.rows ?? 24;
 
     const id = await invoke<string>("spawn_pty", {
-      command: pane.command,
-      args: [],
+      command,
+      args,
       cols,
       rows,
+      cwd: cwd ?? null,
     });
 
     pane.ptyId = id;
@@ -130,6 +146,65 @@ async function stopProcess(paneId: string) {
   cleanupPane(paneId);
 }
 
+function openSettingsModal(paneId: string) {
+  const pane = panes[paneId];
+  if (!pane) return;
+  settingsTargetPane = paneId;
+
+  const modal = document.getElementById("settings-modal")!;
+  const cmdInput = document.getElementById("settings-command") as HTMLInputElement;
+  const argsInput = document.getElementById("settings-args") as HTMLInputElement;
+  const cwdInput = document.getElementById("settings-cwd") as HTMLInputElement;
+
+  cmdInput.value = pane.config.command;
+  argsInput.value = pane.config.args.join(", ");
+  cwdInput.value = pane.config.cwd ?? "";
+
+  modal.style.display = "flex";
+  cmdInput.focus();
+}
+
+function closeSettingsModal() {
+  const modal = document.getElementById("settings-modal")!;
+  modal.style.display = "none";
+  settingsTargetPane = null;
+}
+
+async function saveSettings() {
+  if (!settingsTargetPane) return;
+  const pane = panes[settingsTargetPane];
+  if (!pane) return;
+
+  const cmdInput = document.getElementById("settings-command") as HTMLInputElement;
+  const argsInput = document.getElementById("settings-args") as HTMLInputElement;
+  const cwdInput = document.getElementById("settings-cwd") as HTMLInputElement;
+
+  const command = cmdInput.value.trim();
+  const args = argsInput.value
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+  const cwd = cwdInput.value.trim() || null;
+
+  if (!command) return;
+
+  pane.config = { command, args, cwd };
+
+  // Build full config and persist
+  const config: AppConfig = {
+    left: panes["left"].config,
+    right: panes["right"].config,
+  };
+
+  try {
+    await invoke("save_config", { config });
+  } catch (e) {
+    console.error("Failed to save config:", e);
+  }
+
+  closeSettingsModal();
+}
+
 function setupDivider() {
   const divider = document.getElementById("divider")!;
   const leftPane = document.getElementById("pane-left")!;
@@ -150,12 +225,24 @@ function setupDivider() {
   document.addEventListener("mouseup", () => { dragging = false; });
 }
 
-window.addEventListener("DOMContentLoaded", () => {
+window.addEventListener("DOMContentLoaded", async () => {
+  // Load persisted config (falls back to defaults on first run)
+  let appConfig: AppConfig;
+  try {
+    appConfig = await invoke<AppConfig>("load_config");
+  } catch (e) {
+    console.error("Failed to load config, using defaults:", e);
+    appConfig = {
+      left: { command: "claude", args: [], cwd: null },
+      right: { command: "codex", args: [], cwd: null },
+    };
+  }
+
   const left = createTerminal("terminal-left");
   panes["left"] = {
     ...left,
     ptyId: null,
-    command: "claude",
+    config: appConfig.left,
     unlistenData: null,
     unlistenExit: null,
   };
@@ -164,7 +251,7 @@ window.addEventListener("DOMContentLoaded", () => {
   panes["right"] = {
     ...right,
     ptyId: null,
-    command: "codex",
+    config: appConfig.right,
     unlistenData: null,
     unlistenExit: null,
   };
@@ -175,6 +262,7 @@ window.addEventListener("DOMContentLoaded", () => {
   panes["right"].terminal.writeln("\x1b[36mLi+ Desktop — Codex pane\x1b[0m");
   panes["right"].terminal.writeln("Press \x1b[32mStart\x1b[0m to launch Codex CLI.\r\n");
 
+  // Pane button handlers
   document.querySelectorAll(".pane-btn").forEach((btn) => {
     const el = btn as HTMLButtonElement;
     const action = el.dataset.action!;
@@ -182,7 +270,24 @@ window.addEventListener("DOMContentLoaded", () => {
     el.addEventListener("click", () => {
       if (action === "start") startProcess(paneId);
       else if (action === "stop") stopProcess(paneId);
+      else if (action === "settings") openSettingsModal(paneId);
     });
+  });
+
+  // Modal button handlers
+  document.getElementById("modal-close")!.addEventListener("click", closeSettingsModal);
+  document.getElementById("settings-cancel")!.addEventListener("click", closeSettingsModal);
+  document.getElementById("settings-save")!.addEventListener("click", saveSettings);
+
+  // Close modal on overlay click
+  document.getElementById("settings-modal")!.addEventListener("click", (e) => {
+    if (e.target === e.currentTarget) closeSettingsModal();
+  });
+
+  // Save on Enter key
+  document.getElementById("settings-modal")!.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") saveSettings();
+    if (e.key === "Escape") closeSettingsModal();
   });
 
   setupDivider();
