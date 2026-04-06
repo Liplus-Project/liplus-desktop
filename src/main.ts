@@ -1,13 +1,16 @@
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
-import { Command } from "@tauri-apps/plugin-shell";
+import { invoke } from "@tauri-apps/api/core";
+import { listen, UnlistenFn } from "@tauri-apps/api/event";
 
 interface PaneState {
   terminal: Terminal;
   fitAddon: FitAddon;
-  process: Awaited<ReturnType<Command<string>["spawn"]>> | null;
+  ptyId: string | null;
   command: string;
+  unlistenData: UnlistenFn | null;
+  unlistenExit: UnlistenFn | null;
 }
 
 const panes: Record<string, PaneState> = {};
@@ -24,7 +27,7 @@ function createTerminal(containerId: string): { terminal: Terminal; fitAddon: Fi
       selectionBackground: "#0f346080",
     },
     cursorBlink: true,
-    convertEol: true,
+    convertEol: false,
   });
   const fitAddon = new FitAddon();
   terminal.loadAddon(fitAddon);
@@ -36,7 +39,7 @@ function createTerminal(containerId: string): { terminal: Terminal; fitAddon: Fi
 async function startProcess(paneId: string) {
   const pane = panes[paneId];
   if (!pane) return;
-  if (pane.process) {
+  if (pane.ptyId) {
     pane.terminal.writeln("\r\n\x1b[33m[Already running]\x1b[0m");
     return;
   }
@@ -44,33 +47,41 @@ async function startProcess(paneId: string) {
   pane.terminal.writeln(`\x1b[36m[Starting ${pane.command}...]\x1b[0m`);
 
   try {
-    const cmd = Command.create("shell-cmd", ["/C", pane.command], {
-      encoding: "utf-8",
+    const dims = pane.fitAddon.proposeDimensions() ?? { cols: 80, rows: 24 };
+    const cols = dims.cols ?? 80;
+    const rows = dims.rows ?? 24;
+
+    const id = await invoke<string>("spawn_pty", {
+      command: pane.command,
+      args: [],
+      cols,
+      rows,
     });
 
-    cmd.stdout.on("data", (data: string) => {
-      pane.terminal.write(data);
+    pane.ptyId = id;
+
+    // Listen for PTY output
+    pane.unlistenData = await listen<string>(`pty-data-${id}`, (event) => {
+      pane.terminal.write(event.payload);
     });
 
-    cmd.stderr.on("data", (data: string) => {
-      pane.terminal.write(data);
+    // Listen for PTY exit
+    pane.unlistenExit = await listen<null>(`pty-exit-${id}`, () => {
+      pane.terminal.writeln("\r\n\x1b[33m[Process exited]\x1b[0m");
+      cleanupPane(paneId);
     });
 
-    cmd.on("close", (data: { code: number | null }) => {
-      pane.terminal.writeln(`\r\n\x1b[33m[Exited: ${data.code}]\x1b[0m`);
-      pane.process = null;
-    });
-
-    cmd.on("error", (error: string) => {
-      pane.terminal.writeln(`\r\n\x1b[31m[Error: ${error}]\x1b[0m`);
-      pane.process = null;
-    });
-
-    pane.process = await cmd.spawn();
-
+    // Forward terminal input to PTY
     pane.terminal.onData((data: string) => {
-      if (pane.process) {
-        pane.process.write(data + "\n");
+      if (pane.ptyId) {
+        invoke("write_pty", { id: pane.ptyId, data }).catch(() => {});
+      }
+    });
+
+    // Forward terminal resize to PTY
+    pane.terminal.onResize(({ cols, rows }) => {
+      if (pane.ptyId) {
+        invoke("resize_pty", { id: pane.ptyId, cols, rows }).catch(() => {});
       }
     });
   } catch (e) {
@@ -78,16 +89,31 @@ async function startProcess(paneId: string) {
   }
 }
 
+function cleanupPane(paneId: string) {
+  const pane = panes[paneId];
+  if (!pane) return;
+  pane.ptyId = null;
+  if (pane.unlistenData) {
+    pane.unlistenData();
+    pane.unlistenData = null;
+  }
+  if (pane.unlistenExit) {
+    pane.unlistenExit();
+    pane.unlistenExit = null;
+  }
+}
+
 async function stopProcess(paneId: string) {
   const pane = panes[paneId];
-  if (!pane?.process) return;
+  if (!pane?.ptyId) return;
+  const id = pane.ptyId;
   try {
-    await pane.process.kill();
-    pane.process = null;
+    await invoke("kill_pty", { id });
     pane.terminal.writeln("\r\n\x1b[33m[Stopped]\x1b[0m");
   } catch (e) {
     pane.terminal.writeln(`\r\n\x1b[31m[Stop failed: ${e}]\x1b[0m`);
   }
+  cleanupPane(paneId);
 }
 
 function setupDivider() {
@@ -112,10 +138,22 @@ function setupDivider() {
 
 window.addEventListener("DOMContentLoaded", () => {
   const left = createTerminal("terminal-left");
-  panes["left"] = { ...left, process: null, command: "claude" };
+  panes["left"] = {
+    ...left,
+    ptyId: null,
+    command: "claude",
+    unlistenData: null,
+    unlistenExit: null,
+  };
 
   const right = createTerminal("terminal-right");
-  panes["right"] = { ...right, process: null, command: "codex" };
+  panes["right"] = {
+    ...right,
+    ptyId: null,
+    command: "codex",
+    unlistenData: null,
+    unlistenExit: null,
+  };
 
   panes["left"].terminal.writeln("\x1b[36mLi+ Desktop — Claude Code pane\x1b[0m");
   panes["left"].terminal.writeln("Press \x1b[32mStart\x1b[0m to launch Claude Code CLI.\r\n");
