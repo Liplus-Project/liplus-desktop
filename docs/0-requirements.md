@@ -117,24 +117,41 @@ npm install
 npm run tauri build
 ```
 
-## MVP status (v0.1.0-dev)
+## v0.1.0 (released 2026-04-06)
 
-現在実装済み:
 - Tauri v2 プロジェクト構造
-- 2ペイン分割ターミナルUI（xterm.js）
-- Start/Stop ボタンによる PTY 経由の CLI 起動（portable-pty / ConPTY）
-- ドラッグによるペイン幅変更
-- PTY リサイズ（xterm.js onResize → resize_pty）
-- PTY 出力のストリーミング（Tauri events → xterm.js）
-- PTY への入力転送（xterm.js onData → write_pty）
+- PTY バックエンド（portable-pty / ConPTY）による CLI インタラクティブ実行
+- 2ペイン分割ターミナル UI（xterm.js）+ ドラッグリサイズ
+- エージェント設定 UI（コマンド・引数・作業ディレクトリの設定・永続化）
+- 状態表示バッジ（Running / Stopped / Error）
+- CI（GitHub Actions, cargo check）
+- ConPTY 上での Claude Code CLI / Codex CLI 動作検証済み
 
-未実装:
-- 実際のCLI（claude, codex）との接続テスト（ConPTY 上での動作検証）
-- Li+core.md バンドル・注入
-- GitHub統合
-- Li+各層のUI側実装
-- CI/CD
-- エラーハンドリング・再接続
+## v0.2.0 ロードマップ (計画中)
 
-実装済み（v0.1.0-dev 追加分）:
-- エージェント設定UI（コマンド・引数・作業ディレクトリの設定・永続化）
+ターミナル UI → チャット UI への移行。CLI の構造化 JSON ストリーム出力を使用。
+
+### CLI ↔ チャット UI 接続方式
+
+```
+[チャット UI (WebView)] ↔ Tauri IPC ↔ [Rust: JSON パーサー] ↔ PTY ↔ [CLI --print --output-format stream-json --verbose]
+```
+
+検証済み（2026-04-06）: Claude Code CLI の stream-json 出力は以下の構造化メッセージを返す:
+- `{"type":"system","subtype":"init"}` — セッション初期化
+- `{"type":"assistant","message":{"content":[{"type":"thinking"}]}}` — 思考過程
+- `{"type":"assistant","message":{"content":[{"type":"text"}]}}` — 応答テキスト
+- `{"type":"result"}` — 完了、コスト
+
+### UI 構成
+
+- タブ = エージェント種別（Claude Code / Codex / Gemini / 追加可能）
+- サイドバー = セッション一覧（Claude Desktop のスレッド一覧と同様）
+- メイン = チャット UI（メッセージバブル、markdown レンダリング、コードブロック）
+- xterm.js は廃止（チャット UI に置き換え）
+
+### 設計判断
+
+- API を直接叩かない（サブスクリプション課金枠を使うため CLI 経由が必須）
+- CLI 公式の JSON ストリーム出力を使用（ANSI パースではない）
+- PTY は引き続き必要（CLI のターミナル検出のため）
