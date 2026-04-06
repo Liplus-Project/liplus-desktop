@@ -1,8 +1,6 @@
-import { Terminal } from "@xterm/xterm";
-import { FitAddon } from "@xterm/addon-fit";
-import "@xterm/xterm/css/xterm.css";
+import "./styles.css";
+import { ChatPane } from "./chat";
 import { invoke } from "@tauri-apps/api/core";
-import { listen, UnlistenFn } from "@tauri-apps/api/event";
 
 interface PaneConfig {
   command: string;
@@ -16,12 +14,8 @@ interface AppConfig {
 }
 
 interface PaneState {
-  terminal: Terminal;
-  fitAddon: FitAddon;
-  ptyId: string | null;
+  chat: ChatPane;
   config: PaneConfig;
-  unlistenData: UnlistenFn | null;
-  unlistenExit: UnlistenFn | null;
 }
 
 const panes: Record<string, PaneState> = {};
@@ -35,8 +29,12 @@ function setStatus(paneId: string, status: AgentStatus) {
   badge.textContent = status.charAt(0).toUpperCase() + status.slice(1);
 
   // Update button disabled states
-  const startBtn = document.querySelector(`.pane-btn[data-action="start"][data-pane="${paneId}"]`) as HTMLButtonElement | null;
-  const stopBtn = document.querySelector(`.pane-btn[data-action="stop"][data-pane="${paneId}"]`) as HTMLButtonElement | null;
+  const startBtn = document.querySelector(
+    `.pane-btn[data-action="start"][data-pane="${paneId}"]`,
+  ) as HTMLButtonElement | null;
+  const stopBtn = document.querySelector(
+    `.pane-btn[data-action="stop"][data-pane="${paneId}"]`,
+  ) as HTMLButtonElement | null;
   if (startBtn) startBtn.disabled = status === "running";
   if (stopBtn) stopBtn.disabled = status !== "running";
 }
@@ -44,131 +42,54 @@ function setStatus(paneId: string, status: AgentStatus) {
 // Currently open settings modal target
 let settingsTargetPane: string | null = null;
 
-function createTerminal(containerId: string): { terminal: Terminal; fitAddon: FitAddon } {
-  const container = document.getElementById(containerId)!;
-  const terminal = new Terminal({
-    fontSize: 13,
-    fontFamily: "'Cascadia Code', 'Consolas', monospace",
-    theme: {
-      background: "#0a0a1a",
-      foreground: "#e0e0e0",
-      cursor: "#64ffda",
-      selectionBackground: "#0f346080",
-    },
-    cursorBlink: true,
-    convertEol: false,
-  });
-  const fitAddon = new FitAddon();
-  terminal.loadAddon(fitAddon);
-  terminal.open(container);
-  fitAddon.fit();
-  return { terminal, fitAddon };
-}
-
 async function startProcess(paneId: string) {
   const pane = panes[paneId];
   if (!pane) return;
-  if (pane.ptyId) {
-    pane.terminal.writeln("\r\n\x1b[33m[Already running]\x1b[0m");
+  if (pane.chat.getPtyId()) {
+    pane.chat.appendStatusBanner("Already running");
     return;
   }
 
   const { command, args, cwd } = pane.config;
-  pane.terminal.writeln(`\x1b[36m[Starting ${command}...]\x1b[0m`);
+  pane.chat.clear();
+  pane.chat.appendStatusBanner(`Starting ${command}...`);
 
   try {
-    const dims = pane.fitAddon.proposeDimensions() ?? { cols: 80, rows: 24 };
-    const cols = dims.cols ?? 80;
-    const rows = dims.rows ?? 24;
+    // Use spawn_stream_pty for structured chat messages
+    // Determine cli_kind from command name
+    const cliKind = command.toLowerCase().includes("codex") ? "codex" : "claude";
 
-    const id = await invoke<string>("spawn_pty", {
+    const id = await invoke<string>("spawn_stream_pty", {
       command,
       args,
-      cols,
-      rows,
+      cols: 120,
+      rows: 40,
       cwd: cwd ?? null,
+      cliKind,
     });
 
-    pane.ptyId = id;
     setStatus(paneId, "running");
-
-    // Listen for PTY output
-    pane.unlistenData = await listen<string>(`pty-data-${id}`, (event) => {
-      pane.terminal.write(event.payload);
-    });
-
-    // Listen for PTY exit (payload is exit code or null)
-    pane.unlistenExit = await listen<number | null>(`pty-exit-${id}`, (event) => {
-      const code = event.payload;
-      if (code !== null && code !== 0) {
-        pane.terminal.writeln(`\r\n\x1b[31m[Exited with code ${code}]\x1b[0m`);
-        setStatus(paneId, "error");
-      } else {
-        pane.terminal.writeln("\r\n\x1b[33m[Process exited]\x1b[0m");
-        setStatus(paneId, "stopped");
-      }
-      cleanupPane(paneId);
-    });
-
-    // Forward terminal input to PTY
-    pane.terminal.onData((data: string) => {
-      if (pane.ptyId) {
-        invoke("write_pty", { id: pane.ptyId, data }).catch(() => {});
-      }
-    });
-
-    // Enable Ctrl+V paste from clipboard
-    pane.terminal.attachCustomKeyEventHandler((e: KeyboardEvent) => {
-      if (e.type === "keydown" && e.ctrlKey && e.key === "v") {
-        navigator.clipboard.readText().then((text) => {
-          if (pane.ptyId && text) {
-            invoke("write_pty", { id: pane.ptyId, data: text }).catch(() => {});
-          }
-        });
-        return false; // prevent xterm default handling
-      }
-      // Ctrl+C: let xterm handle it (sends SIGINT via PTY)
-      return true;
-    });
-
-    // Forward terminal resize to PTY
-    pane.terminal.onResize(({ cols, rows }) => {
-      if (pane.ptyId) {
-        invoke("resize_pty", { id: pane.ptyId, cols, rows }).catch(() => {});
-      }
-    });
+    await pane.chat.attach(id);
   } catch (e) {
-    pane.terminal.writeln(`\r\n\x1b[31m[Failed to start: ${e}]\x1b[0m`);
+    pane.chat.appendStatusBanner(`Failed to start: ${e}`);
     setStatus(paneId, "error");
-  }
-}
-
-function cleanupPane(paneId: string) {
-  const pane = panes[paneId];
-  if (!pane) return;
-  pane.ptyId = null;
-  if (pane.unlistenData) {
-    pane.unlistenData();
-    pane.unlistenData = null;
-  }
-  if (pane.unlistenExit) {
-    pane.unlistenExit();
-    pane.unlistenExit = null;
   }
 }
 
 async function stopProcess(paneId: string) {
   const pane = panes[paneId];
-  if (!pane?.ptyId) return;
-  const id = pane.ptyId;
+  if (!pane) return;
+  const id = pane.chat.getPtyId();
+  if (!id) return;
+
   try {
     await invoke("kill_pty", { id });
-    pane.terminal.writeln("\r\n\x1b[33m[Stopped]\x1b[0m");
+    pane.chat.appendStatusBanner("Stopped");
     setStatus(paneId, "stopped");
   } catch (e) {
-    pane.terminal.writeln(`\r\n\x1b[31m[Stop failed: ${e}]\x1b[0m`);
+    pane.chat.appendStatusBanner(`Stop failed: ${e}`);
   }
-  cleanupPane(paneId);
+  pane.chat.detach();
 }
 
 function openSettingsModal(paneId: string) {
@@ -177,8 +98,12 @@ function openSettingsModal(paneId: string) {
   settingsTargetPane = paneId;
 
   const modal = document.getElementById("settings-modal")!;
-  const cmdInput = document.getElementById("settings-command") as HTMLInputElement;
-  const argsInput = document.getElementById("settings-args") as HTMLInputElement;
+  const cmdInput = document.getElementById(
+    "settings-command",
+  ) as HTMLInputElement;
+  const argsInput = document.getElementById(
+    "settings-args",
+  ) as HTMLInputElement;
   const cwdInput = document.getElementById("settings-cwd") as HTMLInputElement;
 
   cmdInput.value = pane.config.command;
@@ -200,8 +125,12 @@ async function saveSettings() {
   const pane = panes[settingsTargetPane];
   if (!pane) return;
 
-  const cmdInput = document.getElementById("settings-command") as HTMLInputElement;
-  const argsInput = document.getElementById("settings-args") as HTMLInputElement;
+  const cmdInput = document.getElementById(
+    "settings-command",
+  ) as HTMLInputElement;
+  const argsInput = document.getElementById(
+    "settings-args",
+  ) as HTMLInputElement;
   const cwdInput = document.getElementById("settings-cwd") as HTMLInputElement;
 
   const command = cmdInput.value.trim();
@@ -236,7 +165,9 @@ function setupDivider() {
   const rightPane = document.getElementById("pane-right")!;
   let dragging = false;
 
-  divider.addEventListener("mousedown", () => { dragging = true; });
+  divider.addEventListener("mousedown", () => {
+    dragging = true;
+  });
   document.addEventListener("mousemove", (e) => {
     if (!dragging) return;
     const container = document.getElementById("panes")!;
@@ -245,9 +176,10 @@ function setupDivider() {
     const clamped = Math.max(0.2, Math.min(0.8, ratio));
     leftPane.style.flex = `${clamped}`;
     rightPane.style.flex = `${1 - clamped}`;
-    Object.values(panes).forEach((p) => p.fitAddon.fit());
   });
-  document.addEventListener("mouseup", () => { dragging = false; });
+  document.addEventListener("mouseup", () => {
+    dragging = false;
+  });
 }
 
 window.addEventListener("DOMContentLoaded", async () => {
@@ -263,29 +195,24 @@ window.addEventListener("DOMContentLoaded", async () => {
     };
   }
 
-  const left = createTerminal("terminal-left");
+  const leftChat = new ChatPane("chat-left");
   panes["left"] = {
-    ...left,
-    ptyId: null,
+    chat: leftChat,
     config: appConfig.left,
-    unlistenData: null,
-    unlistenExit: null,
   };
 
-  const right = createTerminal("terminal-right");
+  const rightChat = new ChatPane("chat-right");
   panes["right"] = {
-    ...right,
-    ptyId: null,
+    chat: rightChat,
     config: appConfig.right,
-    unlistenData: null,
-    unlistenExit: null,
   };
 
-  panes["left"].terminal.writeln("\x1b[36mLi+ Desktop — Claude Code pane\x1b[0m");
-  panes["left"].terminal.writeln("Press \x1b[32mStart\x1b[0m to launch Claude Code CLI.\r\n");
-
-  panes["right"].terminal.writeln("\x1b[36mLi+ Desktop — Codex pane\x1b[0m");
-  panes["right"].terminal.writeln("Press \x1b[32mStart\x1b[0m to launch Codex CLI.\r\n");
+  leftChat.appendStatusBanner(
+    "Li+ Desktop \u2014 Claude Code pane. Press Start to launch.",
+  );
+  rightChat.appendStatusBanner(
+    "Li+ Desktop \u2014 Codex pane. Press Start to launch.",
+  );
 
   // Set initial button states
   setStatus("left", "stopped");
@@ -304,24 +231,30 @@ window.addEventListener("DOMContentLoaded", async () => {
   });
 
   // Modal button handlers
-  document.getElementById("modal-close")!.addEventListener("click", closeSettingsModal);
-  document.getElementById("settings-cancel")!.addEventListener("click", closeSettingsModal);
-  document.getElementById("settings-save")!.addEventListener("click", saveSettings);
+  document
+    .getElementById("modal-close")!
+    .addEventListener("click", closeSettingsModal);
+  document
+    .getElementById("settings-cancel")!
+    .addEventListener("click", closeSettingsModal);
+  document
+    .getElementById("settings-save")!
+    .addEventListener("click", saveSettings);
 
   // Close modal on overlay click
-  document.getElementById("settings-modal")!.addEventListener("click", (e) => {
-    if (e.target === e.currentTarget) closeSettingsModal();
-  });
+  document
+    .getElementById("settings-modal")!
+    .addEventListener("click", (e) => {
+      if (e.target === e.currentTarget) closeSettingsModal();
+    });
 
   // Save on Enter key
-  document.getElementById("settings-modal")!.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") saveSettings();
-    if (e.key === "Escape") closeSettingsModal();
-  });
+  document
+    .getElementById("settings-modal")!
+    .addEventListener("keydown", (e) => {
+      if (e.key === "Enter") saveSettings();
+      if (e.key === "Escape") closeSettingsModal();
+    });
 
   setupDivider();
-
-  window.addEventListener("resize", () => {
-    Object.values(panes).forEach((p) => p.fitAddon.fit());
-  });
 });
