@@ -381,9 +381,17 @@ export class ChatPane {
       this.onUserMessage(text);
     }
 
-    // Send to PTY stdin as a line
+    // Send to stdin as stream-json formatted message
+    // Claude Code --input-format stream-json expects: {"type":"user","message":{"role":"user","content":[{"type":"text","text":"..."}]}}
+    const streamMsg = JSON.stringify({
+      type: "user",
+      message: {
+        role: "user",
+        content: [{ type: "text", text }],
+      },
+    });
     try {
-      await invoke("write_pty", { id: this.ptyId, data: text + "\n" });
+      await invoke("write_pty", { id: this.ptyId, data: streamMsg + "\n" });
     } catch (e) {
       this.appendStatusBanner(`Send failed: ${e}`);
     }
