@@ -224,16 +224,21 @@ fn convert_claude(v: &Value) -> Option<ChatMessage> {
         }
 
         // --- result ---
+        // With --verbose, the assistant text is already displayed via "assistant"
+        // events. The "result" event duplicates that text, so emit it as a status
+        // indicator instead of a text bubble to avoid double display (#39).
         "result" => {
-            let result_text = v
-                .get("result")
-                .and_then(|r| r.as_str())
-                .unwrap_or("")
-                .to_string();
+            let subtype = v.get("subtype").and_then(|s| s.as_str()).unwrap_or("success");
+            let body = if subtype == "success" {
+                "Done".to_string()
+            } else {
+                let detail = v.get("result").and_then(|r| r.as_str()).unwrap_or("");
+                format!("Result ({subtype}): {detail}")
+            };
             Some(ChatMessage {
-                role: Role::Assistant,
-                content_type: ContentType::Text,
-                body: result_text,
+                role: Role::System,
+                content_type: ContentType::Status,
+                body,
                 metadata: Some(v.clone()),
             })
         }
@@ -507,13 +512,26 @@ mod tests {
     }
 
     #[test]
-    fn claude_result() {
+    fn claude_result_success() {
         let v: Value =
             serde_json::from_str(r#"{"type":"result","subtype":"success","result":"Done!"}"#)
                 .unwrap();
         let msg = convert(CliKind::ClaudeCode, &v).unwrap();
-        assert_eq!(msg.role, Role::Assistant);
-        assert_eq!(msg.body, "Done!");
+        assert_eq!(msg.role, Role::System);
+        assert_eq!(msg.content_type, ContentType::Status);
+        assert_eq!(msg.body, "Done");
+    }
+
+    #[test]
+    fn claude_result_error() {
+        let v: Value =
+            serde_json::from_str(r#"{"type":"result","subtype":"error","result":"Rate limited"}"#)
+                .unwrap();
+        let msg = convert(CliKind::ClaudeCode, &v).unwrap();
+        assert_eq!(msg.role, Role::System);
+        assert_eq!(msg.content_type, ContentType::Status);
+        assert!(msg.body.contains("error"));
+        assert!(msg.body.contains("Rate limited"));
     }
 
     #[test]
