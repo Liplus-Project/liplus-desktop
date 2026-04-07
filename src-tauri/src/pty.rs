@@ -1,5 +1,6 @@
 use parking_lot::Mutex;
 use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
+use serde_json;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::sync::Arc;
@@ -14,12 +15,14 @@ struct PtyInstance {
     killer: Box<dyn portable_pty::MasterPty + Send>,
 }
 
-/// Pipe-based process instance for stream-json mode (no PTY).
+/// Pipe-based process instance (retained for write_pty compatibility).
+#[allow(dead_code)]
 struct PipeInstance {
     stdin: std::process::ChildStdin,
     child: std::process::Child,
 }
 
+#[allow(dead_code)]
 enum ProcessInstance {
     Pty(PtyInstance),
     Pipe(PipeInstance),
@@ -194,26 +197,29 @@ pub fn kill_pty(state: tauri::State<PtyState>, id: String) -> Result<(), String>
     Ok(())
 }
 
-/// Spawn a CLI process in stream-json mode using stdin/stdout pipes (not PTY).
+/// Spawn a CLI process in stream-json mode using a real PTY.
 ///
-/// --print mode CLIs produce clean NDJSON on stdout when run without a PTY.
-/// Using pipes instead of PTY avoids ANSI escape contamination and ensures
-/// the CLI does not enter interactive terminal mode.
+/// Uses a PTY so the CLI detects a terminal and shows interactive prompts
+/// (trust confirmation, channel development warning, etc.). The reader thread
+/// operates in two phases:
 ///
-/// This command:
-/// 1. Spawns the CLI with piped stdin/stdout
-/// 2. Reads stdout line-by-line
-/// 3. Parses each line as NDJSON
-/// 4. Converts to a unified ChatMessage via the CLI-specific converter
-/// 5. Emits `chat-message-{id}` Tauri events to the frontend
+/// **Phase 1 (Init):** Read raw PTY output byte-by-byte, accumulating into a
+/// line buffer. Confirmation prompts from Ink UI are auto-accepted by sending
+/// Enter (\r\n). Once a line starting with `{"type":"system"` is detected,
+/// transition to Phase 2.
+///
+/// **Phase 2 (Stream):** Read line-by-line, strip ANSI escapes, parse NDJSON,
+/// and emit `chat-message-{id}` Tauri events — same as the old pipe mode.
+///
+/// User input is sent as stream-json via `write_pty`.
 #[tauri::command]
 pub fn spawn_stream_pty(
     app: AppHandle,
     state: tauri::State<PtyState>,
     command: String,
     args: Vec<String>,
-    #[allow(unused_variables)] cols: u16,
-    #[allow(unused_variables)] rows: u16,
+    cols: u16,
+    rows: u16,
     cwd: Option<String>,
     cli_kind: String,
 ) -> Result<String, String> {
@@ -227,10 +233,20 @@ pub fn spawn_stream_pty(
         }
     };
 
-    // Use std::process::Command with piped stdin/stdout instead of PTY.
-    // This ensures the CLI runs in non-interactive mode with clean NDJSON output.
+    let pty_system = NativePtySystem::default();
+    let size = PtySize {
+        rows,
+        cols,
+        pixel_width: 0,
+        pixel_height: 0,
+    };
+
+    let pair = pty_system
+        .openpty(size)
+        .map_err(|e| format!("Failed to open PTY: {e}"))?;
+
     let mut cmd = if cfg!(windows) {
-        let mut c = std::process::Command::new("cmd.exe");
+        let mut c = CommandBuilder::new("cmd.exe");
         c.arg("/C");
         c.arg(&command);
         for arg in &args {
@@ -238,50 +254,114 @@ pub fn spawn_stream_pty(
         }
         c
     } else {
-        let mut c = std::process::Command::new(&command);
+        let mut c = CommandBuilder::new(&command);
         for arg in &args {
             c.arg(arg);
         }
         c
     };
 
-    cmd.stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null());
-
-    if let Some(dir) = &cwd {
-        cmd.current_dir(dir);
+    if let Some(dir) = cwd {
+        cmd.cwd(dir);
     }
 
-    let mut child = cmd
-        .spawn()
+    let child = pair
+        .slave
+        .spawn_command(cmd)
         .map_err(|e| format!("Failed to spawn '{command}': {e}"))?;
 
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "Failed to capture stdout".to_string())?;
+    let writer = pair
+        .master
+        .take_writer()
+        .map_err(|e| format!("Failed to get PTY writer: {e}"))?;
 
-    let stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| "Failed to capture stdin".to_string())?;
+    let mut reader = pair
+        .master
+        .try_clone_reader()
+        .map_err(|e| format!("Failed to get PTY reader: {e}"))?;
 
     let id = Uuid::new_v4().to_string();
     let id_clone = id.clone();
     let id_clone2 = id.clone();
     let app_clone = app.clone();
 
-    // Store pipe-based process
+    // writer_for_init: we use the procs map to access the writer from the
+    // background thread (take_writer can only be called once).
+
     state.procs.lock().insert(
         id.clone(),
-        ProcessInstance::Pipe(PipeInstance { stdin, child }),
+        ProcessInstance::Pty(PtyInstance {
+            writer,
+            child,
+            killer: pair.master,
+        }),
     );
 
-    // Spawn background thread: line-buffered NDJSON parser
+    // Spawn background thread: Phase 1 (init) → Phase 2 (stream)
     let procs_clone = Arc::clone(&state.procs);
     std::thread::spawn(move || {
-        let buf_reader = BufReader::new(stdout);
+        // ── Phase 1: Auto-confirm interactive prompts ──
+        // Read byte-by-byte, detect prompts, send Enter.
+        // Transition when we see the first JSON line.
+        let mut init_buf = Vec::with_capacity(8192);
+        let mut byte = [0u8; 1];
+        let mut json_start = None;
+
+        'init: loop {
+            match reader.read(&mut byte) {
+                Ok(0) => break,
+                Ok(1) => {
+                    init_buf.push(byte[0]);
+
+                    // Check if current buffer ends with a line
+                    if byte[0] == b'\n' || init_buf.len() > 4096 {
+                        let line = String::from_utf8_lossy(&init_buf);
+                        let stripped = stream_parser::strip_ansi(&line);
+                        let trimmed = stripped.trim();
+
+                        // Detect JSON start → transition to Phase 2
+                        if trimmed.starts_with('{') {
+                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
+                                // Found first JSON line, process it and switch to Phase 2
+                                json_start = Some(v);
+                                break 'init;
+                            }
+                        }
+
+                        // Auto-confirm: Ink UI renders selection prompts.
+                        // When we see "> 1." (selected option), send Enter.
+                        if trimmed.contains("> 1.") || trimmed.contains("Enter to confirm") {
+                            let mut map = procs_clone.lock();
+                            if let Some(ProcessInstance::Pty(pty)) = map.get_mut(&id_clone2) {
+                                let _ = pty.writer.write_all(b"\r\n");
+                                let _ = pty.writer.flush();
+                            }
+                            drop(map);
+                        }
+
+                        init_buf.clear();
+                    }
+                }
+                _ => break,
+            }
+        }
+
+        // Process the first JSON value if we found one
+        if let Some(value) = &json_start {
+            let messages = stream_parser::convert_claude_all(value);
+            if !messages.is_empty() && kind == CliKind::ClaudeCode {
+                for msg in messages {
+                    let _ = app_clone.emit(&format!("chat-message-{}", id_clone), &msg);
+                }
+            } else if let Some(msg) = stream_parser::convert(kind, value) {
+                let _ = app_clone.emit(&format!("chat-message-{}", id_clone), &msg);
+            }
+            let _ = app_clone.emit(&format!("stream-raw-{}", id_clone), value);
+        }
+
+        // ── Phase 2: Stream NDJSON ──
+        // Wrap reader in BufReader for line-by-line reading.
+        let buf_reader = BufReader::new(reader);
         for line in buf_reader.lines() {
             match line {
                 Ok(text) => {
@@ -300,11 +380,12 @@ pub fn spawn_stream_pty(
                 Err(_) => break,
             }
         }
+
         // Collect exit code
         let exit_code: Option<u32> = {
             let mut map = procs_clone.lock();
-            if let Some(ProcessInstance::Pipe(pipe)) = map.get_mut(&id_clone2) {
-                pipe.child.wait().ok().map(|s| s.code().unwrap_or(1) as u32)
+            if let Some(ProcessInstance::Pty(pty)) = map.get_mut(&id_clone2) {
+                pty.child.wait().ok().map(|status| status.exit_code())
             } else {
                 None
             }

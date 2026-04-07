@@ -14,7 +14,7 @@ pub enum CliKind {
 
 /// Strip ANSI escape sequences from a string.
 /// Handles CSI sequences (\x1b[...X), OSC sequences (\x1b]...ST), and simple escapes (\x1bX).
-fn strip_ansi(s: &str) -> String {
+pub fn strip_ansi(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {
