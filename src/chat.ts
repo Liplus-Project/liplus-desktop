@@ -225,7 +225,11 @@ export class ChatPane {
       (msg.content_type === "text" || msg.content_type === "thinking")
     ) {
       if (this.streamingType === msg.content_type && this.streamingBubble) {
-        // Continue accumulating
+        // Continue accumulating — ensure newline between consecutive chunks
+        // so line breaks are preserved when blocks are concatenated (#34)
+        if (this.streamingBody.length > 0 && !this.streamingBody.endsWith('\n')) {
+          this.streamingBody += '\n';
+        }
         this.streamingBody += msg.body;
         this.updateStreamingBubble();
         return;
