@@ -37,6 +37,8 @@ export class ChatPane {
   private unlistenExit: UnlistenFn | null = null;
   /** Callback when user sends a message (for auto-naming). */
   onUserMessage: ((text: string) => void) | null = null;
+  /** Callback for Codex per-message send (set by TabManager). */
+  onCodexSend: ((prompt: string) => Promise<void>) | null = null;
   /** Whether user has scrolled up (disables auto-scroll) */
   private userScrolled = false;
   /** Element for the currently streaming assistant message (appended incrementally) */
@@ -374,7 +376,21 @@ export class ChatPane {
 
   private async sendMessage(): Promise<void> {
     const text = this.textareaEl.value.trim();
-    if (!text || !this.ptyId) return;
+    if (!text) return;
+
+    // Codex per-message mode: delegate to the callback (no persistent ptyId needed)
+    if (this.onCodexSend) {
+      const userMsg: ChatMessage = { role: "user", content_type: "text", body: text };
+      this.pushHistory({ role: "user", content_type: "text", body: text });
+      this.appendBubble(userMsg);
+      if (this.onUserMessage) this.onUserMessage(text);
+      this.textareaEl.value = "";
+      this.textareaEl.style.height = "auto";
+      await this.onCodexSend(text);
+      return;
+    }
+
+    if (!this.ptyId) return;
 
     // Display user message as a bubble
     const userMsg: ChatMessage = { role: "user", content_type: "text", body: text };

@@ -132,18 +132,41 @@ export class TabManager {
 
     const { command, args, cwd, cli_kind } = state.config;
 
-    // Inject stream-json flags based on CLI kind
-    let streamArgs: string[];
-    if (cli_kind === "claude") {
-      streamArgs = ["--output-format", "stream-json", "--input-format", "stream-json", "--verbose", ...args];
-    } else if (cli_kind === "codex") {
-      streamArgs = ["exec", "--json", ...args];
-    } else {
-      streamArgs = [...args];
+    state.chat.clear();
+
+    if (cli_kind === "codex") {
+      // Codex: message-per-process model.
+      // Don't start a process now — wait for the user to send a message.
+      state.chat.appendStatusBanner(`Li+ Desktop — ${state.config.name}. Type a message to start.`);
+      this.setStatus(tabId, "stopped");
+      // Wire up the per-message handler
+      state.chat.onCodexSend = async (prompt: string) => {
+        state.chat.appendStatusBanner("Running...");
+        this.setStatus(tabId, "running");
+        try {
+          const execArgs = ["exec", "--json", "--full-auto", "--skip-git-repo-check", ...args, prompt];
+          const id = await invoke<string>("spawn_stream_pipe", {
+            command,
+            args: execArgs,
+            cwd: cwd ?? null,
+            cliKind: cli_kind,
+          });
+          await state.chat.attach(id, () => {
+            this.setStatus(tabId, "stopped");
+          });
+        } catch (e) {
+          state.chat.appendStatusBanner(`Failed: ${e}`);
+          this.setStatus(tabId, "error");
+        }
+      };
+      return;
     }
 
-    state.chat.clear();
+    // Claude Code: persistent session via PTY + stream-json
+    const streamArgs = ["--output-format", "stream-json", "--input-format", "stream-json", "--verbose", ...args];
+
     state.chat.appendStatusBanner(`Starting ${command}...`);
+    state.chat.onCodexSend = null;
 
     try {
       const id = await invoke<string>("spawn_stream_pty", {

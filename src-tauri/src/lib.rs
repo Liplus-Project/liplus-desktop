@@ -13,6 +13,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             pty::spawn_pty,
             pty::spawn_stream_pty,
+            pty::spawn_stream_pipe,
             pty::write_pty,
             pty::resize_pty,
             pty::kill_pty,

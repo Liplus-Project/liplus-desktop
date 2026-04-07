@@ -449,6 +449,13 @@ fn convert_codex(v: &Value) -> Option<ChatMessage> {
 /// Extract text from a Codex item's content field.
 /// Content can be a string or an array of { type: "text", text: "..." } objects.
 fn extract_codex_text(item: &Value) -> String {
+    // Try top-level "text" field first (v0.118.0+ uses this for agent_message)
+    if let Some(s) = item.get("text").and_then(|t| t.as_str()) {
+        if !s.is_empty() {
+            return s.to_string();
+        }
+    }
+    // Fall back to "content" field (array of {type,text} or plain string)
     if let Some(content) = item.get("content") {
         if let Some(s) = content.as_str() {
             return s.to_string();

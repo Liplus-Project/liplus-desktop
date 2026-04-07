@@ -395,3 +395,117 @@ pub fn spawn_stream_pty(
 
     Ok(id)
 }
+
+/// Spawn a CLI process in pipe mode for non-interactive CLIs (e.g. Codex exec).
+///
+/// Uses stdin/stdout pipes (no PTY). Reads stdout line-by-line, parses NDJSON,
+/// and emits `chat-message-{id}` Tauri events. Stdin is closed immediately
+/// (Codex exec takes the prompt via CLI args, not stdin).
+#[tauri::command]
+pub fn spawn_stream_pipe(
+    app: AppHandle,
+    state: tauri::State<PtyState>,
+    command: String,
+    args: Vec<String>,
+    cwd: Option<String>,
+    cli_kind: String,
+) -> Result<String, String> {
+    let kind = match cli_kind.as_str() {
+        "claude" => CliKind::ClaudeCode,
+        "codex" => CliKind::Codex,
+        other => {
+            return Err(format!(
+                "Unknown cli_kind: {other}. Expected 'claude' or 'codex'."
+            ))
+        }
+    };
+
+    let mut cmd = if cfg!(windows) {
+        let mut c = std::process::Command::new("cmd.exe");
+        c.arg("/C");
+        c.arg(&command);
+        for arg in &args {
+            c.arg(arg);
+        }
+        c
+    } else {
+        let mut c = std::process::Command::new(&command);
+        for arg in &args {
+            c.arg(arg);
+        }
+        c
+    };
+
+    if let Some(dir) = cwd {
+        cmd.current_dir(dir);
+    }
+
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to spawn '{command}': {e}"))?;
+
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Failed to capture stdout".to_string())?;
+
+    let id = Uuid::new_v4().to_string();
+    let id_clone = id.clone();
+    let id_clone2 = id.clone();
+    let app_clone = app.clone();
+
+    state.procs.lock().insert(
+        id.clone(),
+        ProcessInstance::Pipe(PipeInstance {
+            stdin: child.stdin.take().unwrap_or_else(|| {
+                // stdin was set to null; create a placeholder that will never be used.
+                // PipeInstance requires a ChildStdin field for write_pty compatibility.
+                std::process::Command::new(if cfg!(windows) { "cmd.exe" } else { "true" })
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::null())
+                    .spawn()
+                    .expect("placeholder stdin spawn")
+                    .stdin
+                    .take()
+                    .expect("placeholder stdin")
+            }),
+            child,
+        }),
+    );
+
+    // Background reader thread: line-by-line NDJSON parsing
+    let procs_clone = Arc::clone(&state.procs);
+    std::thread::spawn(move || {
+        let buf_reader = BufReader::new(stdout);
+        for line in buf_reader.lines() {
+            match line {
+                Ok(text) => {
+                    if let Some(value) = stream_parser::parse_ndjson_line(&text) {
+                        if let Some(msg) = stream_parser::convert(kind, &value) {
+                            let _ = app_clone.emit(&format!("chat-message-{}", id_clone), &msg);
+                        }
+                        let _ = app_clone.emit(&format!("stream-raw-{}", id_clone), &value);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+
+        // Collect exit code
+        let exit_code: Option<u32> = {
+            let mut map = procs_clone.lock();
+            if let Some(ProcessInstance::Pipe(pipe)) = map.get_mut(&id_clone2) {
+                pipe.child.wait().ok().map(|s| s.code().unwrap_or(1) as u32)
+            } else {
+                None
+            }
+        };
+        let _ = app_clone.emit(&format!("pty-exit-{}", id_clone2), exit_code);
+    });
+
+    Ok(id)
+}
