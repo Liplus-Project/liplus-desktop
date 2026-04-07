@@ -134,14 +134,20 @@ npm run tauri build
 ### CLI ↔ チャット UI 接続方式
 
 ```
-[チャット UI (WebView)] ↔ Tauri IPC ↔ [Rust: JSON パーサー] ↔ PTY ↔ [CLI --print --output-format stream-json --verbose]
+[チャット UI (WebView)] ↔ Tauri IPC ↔ [Rust: JSON パーサー] ↔ pipe ↔ [CLI --output-format stream-json --input-format stream-json --verbose]
 ```
 
-検証済み（2026-04-06）: Claude Code CLI の stream-json 出力は以下の構造化メッセージを返す:
+検証済み（2026-04-07）: `--print` なしのインタラクティブモードで `--output-format stream-json` が動作する。
+`--print` を外すことで以下が可能になる:
+- セッション持続（stdin が開いてる限り終了しない）
+- Channel push notification の受信（CLI 限定機能をデスクトップで利用可能に）
+- 同一セッション内での複数ターン会話
+
+Claude Code CLI の stream-json 出力は以下の構造化メッセージを返す:
 - `{"type":"system","subtype":"init"}` — セッション初期化
 - `{"type":"assistant","message":{"content":[{"type":"thinking"}]}}` — 思考過程
 - `{"type":"assistant","message":{"content":[{"type":"text"}]}}` — 応答テキスト
-- `{"type":"result"}` — 完了、コスト
+- `{"type":"result"}` — ターン完了（ステータス表示）
 
 ### UI 構成
 
@@ -154,4 +160,5 @@ npm run tauri build
 
 - API を直接叩かない（サブスクリプション課金枠を使うため CLI 経由が必須）
 - CLI 公式の JSON ストリーム出力を使用（ANSI パースではない）
-- PTY は引き続き必要（CLI のターミナル検出のため）
+- `--print` は使用しない（Channel push 受信とセッション持続のため、インタラクティブモードで起動）
+- pipe ベース（PTY ではなく stdin/stdout パイプで接続）
