@@ -297,12 +297,40 @@ pub fn spawn_stream_pty(
         }),
     );
 
+    // Spawn a helper thread that sends Enter keys periodically during init.
+    // Ink UI confirmation prompts expect Enter to proceed. Since the prompts
+    // use ANSI cursor control (no newlines), pattern matching is unreliable.
+    // Instead, we send Enter every 2 seconds until the reader thread signals
+    // that JSON output has started (init is complete).
+    let init_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let init_done_writer = Arc::clone(&init_done);
+    let procs_for_enter = Arc::clone(&state.procs);
+    let id_for_enter = id.clone();
+    std::thread::spawn(move || {
+        // Wait a moment for the CLI to start up
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        // Send Enter periodically until init is done
+        for _ in 0..15 {
+            if init_done_writer.load(std::sync::atomic::Ordering::Relaxed) {
+                break;
+            }
+            {
+                let mut map = procs_for_enter.lock();
+                if let Some(ProcessInstance::Pty(pty)) = map.get_mut(&id_for_enter) {
+                    let _ = pty.writer.write_all(b"\r");
+                    let _ = pty.writer.flush();
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_secs(2));
+        }
+    });
+
     // Spawn background thread: Phase 1 (init) → Phase 2 (stream)
     let procs_clone = Arc::clone(&state.procs);
     std::thread::spawn(move || {
-        // ── Phase 1: Auto-confirm interactive prompts ──
-        // Read byte-by-byte, detect prompts, send Enter.
-        // Transition when we see the first JSON line.
+        // ── Phase 1: Read PTY output until first JSON line ──
+        // Ink UI uses ANSI cursor control, so output has no reliable newlines.
+        // We read byte-by-byte and check for JSON start on every `\n` or `{`.
         let mut init_buf = Vec::with_capacity(8192);
         let mut byte = [0u8; 1];
         let mut json_start = None;
@@ -313,38 +341,43 @@ pub fn spawn_stream_pty(
                 Ok(1) => {
                     init_buf.push(byte[0]);
 
-                    // Check if current buffer ends with a line
-                    if byte[0] == b'\n' || init_buf.len() > 4096 {
-                        let line = String::from_utf8_lossy(&init_buf);
-                        let stripped = stream_parser::strip_ansi(&line);
-                        let trimmed = stripped.trim();
+                    // On newline or when we see '{', check if we have JSON
+                    if byte[0] == b'\n' || byte[0] == b'{' || init_buf.len() > 4096 {
+                        let text = String::from_utf8_lossy(&init_buf);
+                        let stripped = stream_parser::strip_ansi(&text);
 
-                        // Detect JSON start → transition to Phase 2
-                        if trimmed.starts_with('{') {
-                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                                // Found first JSON line, process it and switch to Phase 2
+                        // Scan for JSON object in the buffer
+                        if let Some(json_pos) = stripped.find('{') {
+                            let candidate = &stripped[json_pos..];
+                            // Try to find a complete JSON object
+                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(candidate.trim()) {
                                 json_start = Some(v);
                                 break 'init;
                             }
-                        }
-
-                        // Auto-confirm: Ink UI renders selection prompts.
-                        // When we see "> 1." (selected option), send Enter.
-                        if trimmed.contains("> 1.") || trimmed.contains("Enter to confirm") {
-                            let mut map = procs_clone.lock();
-                            if let Some(ProcessInstance::Pty(pty)) = map.get_mut(&id_clone2) {
-                                let _ = pty.writer.write_all(b"\r\n");
-                                let _ = pty.writer.flush();
+                            // If candidate contains newline, try up to the first newline
+                            if let Some(nl) = candidate.find('\n') {
+                                let line = candidate[..nl].trim();
+                                if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                                    json_start = Some(v);
+                                    break 'init;
+                                }
                             }
-                            drop(map);
                         }
 
-                        init_buf.clear();
+                        // Keep buffer manageable
+                        if init_buf.len() > 4096 {
+                            // Keep last 1024 bytes (might contain partial JSON)
+                            let drain_to = init_buf.len() - 1024;
+                            init_buf.drain(..drain_to);
+                        }
                     }
                 }
                 _ => break,
             }
         }
+
+        // Signal the Enter-sender thread to stop
+        init_done.store(true, std::sync::atomic::Ordering::Relaxed);
 
         // Process the first JSON value if we found one
         if let Some(value) = &json_start {
