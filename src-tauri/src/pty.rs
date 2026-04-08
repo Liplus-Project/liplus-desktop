@@ -359,12 +359,13 @@ pub fn spawn_stream_pty(
             let _ = app_clone.emit(&format!("stream-raw-{}", id_clone), value);
         }
 
-        // ── Phase 2: Stream NDJSON ──
+        // ── Phase 2: Stream NDJSON (or ANSI in interactive/Channel mode) ──
         // Wrap reader in BufReader for line-by-line reading.
         let buf_reader = BufReader::new(reader);
         for line in buf_reader.lines() {
             match line {
                 Ok(text) => {
+                    // Try JSON first (stream-json mode)
                     if let Some(value) = stream_parser::parse_ndjson_line(&text) {
                         let messages = stream_parser::convert_claude_all(&value);
                         if !messages.is_empty() && kind == CliKind::ClaudeCode {
@@ -375,6 +376,11 @@ pub fn spawn_stream_pty(
                             let _ = app_clone.emit(&format!("chat-message-{}", id_clone), &msg);
                         }
                         let _ = app_clone.emit(&format!("stream-raw-{}", id_clone), &value);
+                    } else {
+                        // Not JSON — check for Channel push in ANSI output
+                        if let Some(push_msg) = stream_parser::detect_channel_push(&text) {
+                            let _ = app_clone.emit(&format!("chat-message-{}", id_clone), &push_msg);
+                        }
                     }
                 }
                 Err(_) => break,

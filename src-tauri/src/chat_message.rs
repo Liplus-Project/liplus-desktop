@@ -10,6 +10,7 @@ pub enum ContentType {
     ToolUse,
     ToolResult,
     Status,
+    ChannelPush,
 }
 
 /// Role of the message sender in the conversation.

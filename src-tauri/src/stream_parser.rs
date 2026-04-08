@@ -12,6 +12,46 @@ pub enum CliKind {
 // Common layer: NDJSON line parser
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Channel push detection (from PTY/Ink UI ANSI output)
+// ---------------------------------------------------------------------------
+
+/// Try to extract a Channel push notification from raw ANSI output.
+/// Channel push lines look like:
+///   `github-webhook-mcp  sender: [event_type] repo action: verb`
+/// Returns a ChatMessage if a push notification is found.
+pub fn detect_channel_push(raw: &str) -> Option<ChatMessage> {
+    let stripped = strip_ansi(raw);
+    // Pattern: MCP server name followed by sender info and event details
+    // e.g. "github-webhook-mcp  liplus-lin-lay: [issue_comment] Liplus-Project/liplus-desktop action: creat"
+    if let Some(idx) = stripped.find("[issue_comment]")
+        .or_else(|| stripped.find("[issues]"))
+        .or_else(|| stripped.find("[pull_request]"))
+        .or_else(|| stripped.find("[push]"))
+        .or_else(|| stripped.find("[check_run]"))
+        .or_else(|| stripped.find("[workflow_run]"))
+        .or_else(|| stripped.find("[workflow_job]"))
+    {
+        // Find the start of the notification line (look backwards for the MCP server name)
+        let before = &stripped[..idx];
+        let line_start = before.rfind("github-webhook-mcp")
+            .or_else(|| before.rfind("  "))  // fallback: look for double-space separator
+            .unwrap_or(0);
+        let line_end = stripped[idx..].find('\n').map(|p| idx + p).unwrap_or(stripped.len());
+        let notification = stripped[line_start..line_end].trim().to_string();
+
+        if !notification.is_empty() {
+            return Some(ChatMessage {
+                role: Role::System,
+                content_type: ContentType::ChannelPush,
+                body: notification,
+                metadata: None,
+            });
+        }
+    }
+    None
+}
+
 /// Strip ANSI escape sequences from a string.
 /// Handles CSI sequences (\x1b[...X), OSC sequences (\x1b]...ST), and simple escapes (\x1bX).
 pub fn strip_ansi(s: &str) -> String {
@@ -571,5 +611,33 @@ mod tests {
         assert_eq!(msg.role, Role::Assistant);
         assert_eq!(msg.content_type, ContentType::ToolUse);
         assert!(msg.body.contains("ls -la"));
+    }
+
+    #[test]
+    fn codex_agent_message_text_field() {
+        // Codex v0.118.0+ uses "text" field instead of "content"
+        let v: Value = serde_json::from_str(
+            r#"{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"Hello!"}}"#,
+        )
+        .unwrap();
+        let msg = convert(CliKind::Codex, &v).unwrap();
+        assert_eq!(msg.role, Role::Assistant);
+        assert_eq!(msg.content_type, ContentType::Text);
+        assert_eq!(msg.body, "Hello!");
+    }
+
+    #[test]
+    fn channel_push_detection() {
+        let ansi_line = "\x1b[38;2;177;185;249m\x1b[38;2;153;153;153m\x1b[1Cgithub-webhook-mcp  liplus-lin-lay:\x1b[m\x1b[1C[issue_comment]\x1b[1CLiplus-Project/liplus-desktop\x1b[1Caction:\x1b[1Ccreated";
+        let msg = detect_channel_push(ansi_line).unwrap();
+        assert_eq!(msg.content_type, ContentType::ChannelPush);
+        assert!(msg.body.contains("github-webhook-mcp"));
+        assert!(msg.body.contains("[issue_comment]"));
+    }
+
+    #[test]
+    fn channel_push_no_match() {
+        assert!(detect_channel_push("normal text without push").is_none());
+        assert!(detect_channel_push("\x1b[38;2;215;119;87m Gusting").is_none());
     }
 }
