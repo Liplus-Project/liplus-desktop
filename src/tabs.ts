@@ -24,21 +24,31 @@ export interface AppConfig {
 export type AgentStatus = "stopped" | "running" | "error";
 
 // ---------------------------------------------------------------------------
+// SessionState — one session's terminal + PTY runtime state
+// ---------------------------------------------------------------------------
+
+interface SessionState {
+  terminal: Terminal;
+  fitAddon: FitAddon;
+  containerEl: HTMLElement; // terminal-container div for this session
+  ptyId: string | null;
+  unlistenData: UnlistenFn | null;
+  unlistenExit: UnlistenFn | null;
+}
+
+// ---------------------------------------------------------------------------
 // TabState — one tab's runtime state
 // ---------------------------------------------------------------------------
 
 interface TabState {
   config: TabConfig;
-  terminal: Terminal;
-  fitAddon: FitAddon;
+  sessions: Map<string, SessionState>;
+  activeSessionId: string | null;
   sessionMgr: SessionManager;
   containerEl: HTMLElement;
-  terminalContainerEl: HTMLElement;
+  terminalAreaEl: HTMLElement;
   tabEl: HTMLElement;
   status: AgentStatus;
-  ptyId: string | null;
-  unlistenData: UnlistenFn | null;
-  unlistenExit: UnlistenFn | null;
   resizeObserver: ResizeObserver | null;
   suppressResize: boolean;
 }
@@ -105,8 +115,21 @@ export class TabManager {
     }
 
     // Ensure each tab has at least one session
+    // (ensureDefaultSession calls createSession which fires onSessionCreate)
     for (const [, mgr] of this.sessionManagers) {
       mgr.ensureDefaultSession();
+    }
+
+    // For restored sessions (from importData), create terminals for the active session
+    // importData does not fire onSessionCreate, so terminals must be created here
+    for (const [tabId, state] of this.tabs) {
+      const mgr = this.sessionManagers.get(tabId);
+      if (mgr) {
+        const activeId = mgr.getActiveSessionId();
+        if (activeId && !state.sessions.has(activeId)) {
+          this.createSessionTerminal(tabId, activeId);
+        }
+      }
     }
   }
 
@@ -130,21 +153,25 @@ export class TabManager {
     return { tabs };
   }
 
-  /** Start the process for a tab. */
+  /** Start the process for a tab (operates on active session). */
   async startTab(tabId: string): Promise<void> {
     const state = this.tabs.get(tabId);
     if (!state) return;
-    if (state.ptyId) return; // Already running
+    if (!state.activeSessionId) return;
+
+    const ss = state.sessions.get(state.activeSessionId);
+    if (!ss) return;
+    if (ss.ptyId) return; // Already running
 
     const { command, args, cwd } = state.config;
 
     // Clear terminal for fresh start
-    state.terminal.clear();
+    ss.terminal.clear();
 
-    // Spawn PTY — pass user's configured args only, no stream-json flags
+    // Spawn PTY
     try {
-      const cols = state.terminal.cols;
-      const rows = state.terminal.rows;
+      const cols = ss.terminal.cols;
+      const rows = ss.terminal.rows;
       const id = await invoke<string>("spawn_pty", {
         command,
         args,
@@ -153,19 +180,19 @@ export class TabManager {
         cwd: cwd ?? null,
       });
 
-      state.ptyId = id;
+      ss.ptyId = id;
       this.setStatus(tabId, "running");
 
       // Listen for PTY output
-      state.unlistenData = await listen<string>(
+      ss.unlistenData = await listen<string>(
         `pty-data-${id}`,
         (event) => {
-          state.terminal.write(event.payload);
+          ss.terminal.write(event.payload);
         },
       );
 
       // Listen for PTY exit
-      state.unlistenExit = await listen<number | null>(
+      ss.unlistenExit = await listen<number | null>(
         `pty-exit-${id}`,
         (event) => {
           const code = event.payload;
@@ -173,53 +200,55 @@ export class TabManager {
             code !== null && code !== 0
               ? `\r\n[Process exited with code ${code}]`
               : "\r\n[Process exited]";
-          state.terminal.write(msg);
-          this.detachPty(tabId);
+          ss.terminal.write(msg);
+          this.detachSessionPty(ss);
           this.setStatus(tabId, "stopped");
         },
       );
 
       // Initial fit after attach
       setTimeout(() => {
-        state.fitAddon.fit();
+        ss.fitAddon.fit();
       }, 50);
     } catch (e) {
-      state.terminal.write(`\r\nFailed to start: ${e}\r\n`);
+      ss.terminal.write(`\r\nFailed to start: ${e}\r\n`);
       this.setStatus(tabId, "error");
     }
   }
 
-  /** Stop the process for a tab. */
+  /** Stop the process for a tab (operates on active session). */
   async stopTab(tabId: string): Promise<void> {
     const state = this.tabs.get(tabId);
     if (!state) return;
-    if (!state.ptyId) return;
+    if (!state.activeSessionId) return;
+
+    const ss = state.sessions.get(state.activeSessionId);
+    if (!ss) return;
+    if (!ss.ptyId) return;
 
     try {
-      await invoke("kill_pty", { id: state.ptyId });
-      state.terminal.write("\r\n[Stopped]");
+      await invoke("kill_pty", { id: ss.ptyId });
+      ss.terminal.write("\r\n[Stopped]");
       this.setStatus(tabId, "stopped");
     } catch (e) {
-      state.terminal.write(`\r\n[Stop failed: ${e}]`);
+      ss.terminal.write(`\r\n[Stop failed: ${e}]`);
     }
-    this.detachPty(tabId);
+    this.detachSessionPty(ss);
   }
 
   // -----------------------------------------------------------------------
   // PTY lifecycle helpers
   // -----------------------------------------------------------------------
 
-  private detachPty(tabId: string): void {
-    const state = this.tabs.get(tabId);
-    if (!state) return;
-    state.ptyId = null;
-    if (state.unlistenData) {
-      state.unlistenData();
-      state.unlistenData = null;
+  private detachSessionPty(ss: SessionState): void {
+    ss.ptyId = null;
+    if (ss.unlistenData) {
+      ss.unlistenData();
+      ss.unlistenData = null;
     }
-    if (state.unlistenExit) {
-      state.unlistenExit();
-      state.unlistenExit = null;
+    if (ss.unlistenExit) {
+      ss.unlistenExit();
+      ss.unlistenExit = null;
     }
   }
 
@@ -228,55 +257,64 @@ export class TabManager {
   // -----------------------------------------------------------------------
 
   private createTab(cfg: TabConfig, activate: boolean): void {
-    // Tab content wrapper (hidden by default) — flex row for sidebar + terminal
+    // Tab content wrapper (hidden by default) — flex row for sidebar + terminal area
     const containerEl = document.createElement("div");
     containerEl.className = "tab-content";
     containerEl.dataset.tabId = cfg.id;
     containerEl.style.display = "none";
     this.contentAreaEl.appendChild(containerEl);
 
-    // Terminal container (right side of the flex row)
-    const terminalContainerEl = document.createElement("div");
-    terminalContainerEl.className = "terminal-container";
-    containerEl.appendChild(terminalContainerEl);
+    // Terminal area — parent for per-session terminal-container divs
+    const terminalAreaEl = document.createElement("div");
+    terminalAreaEl.className = "terminal-area";
+    containerEl.appendChild(terminalAreaEl);
 
-    // Create xterm.js terminal
-    const terminal = new Terminal({
-      cursorBlink: true,
-      fontSize: 14,
-      theme: { background: "#0a0a1a" },
-    });
-    const fitAddon = new FitAddon();
-    terminal.loadAddon(fitAddon);
-
-    // SessionManager builds sidebar and inserts it before terminalContainerEl
+    // SessionManager builds sidebar and inserts it before terminalAreaEl
     const sessionMgr = new SessionManager(cfg.id, containerEl);
     sessionMgr.onSessionsChange = () => {
       if (this.onSessionsChange) {
         this.onSessionsChange();
       }
     };
-    sessionMgr.onSessionSwitch = (_sessionId: string) => {
-      // Restart PTY: stop current, clear terminal, start fresh
-      this.stopTab(cfg.id).then(() => {
-        const st = this.tabs.get(cfg.id);
-        if (st) st.terminal.clear();
-        this.startTab(cfg.id);
-      });
+
+    const tabState: TabState = {
+      config: cfg,
+      sessions: new Map(),
+      activeSessionId: null,
+      sessionMgr,
+      containerEl,
+      terminalAreaEl,
+      tabEl: null!, // assigned below after DOM creation
+      status: "stopped",
+      resizeObserver: null,
+      suppressResize: false,
+    };
+
+    // Wire session callbacks — create/delete/switch terminals per session
+    sessionMgr.onSessionCreate = (sessionId: string) => {
+      this.createSessionTerminal(cfg.id, sessionId);
+    };
+    sessionMgr.onSessionDelete = (sessionId: string) => {
+      this.destroySessionTerminal(cfg.id, sessionId);
+    };
+    sessionMgr.onSessionSwitch = (sessionId: string) => {
+      this.switchSessionTerminal(cfg.id, sessionId);
     };
     this.sessionManagers.set(cfg.id, sessionMgr);
 
-    // Open terminal into the container element
-    terminal.open(terminalContainerEl);
-
-    // ResizeObserver to auto-fit terminal on container resize
-    // Guard against zero-dimension calls when tab is hidden (display:none)
+    // ResizeObserver on terminal area — fit the active session's terminal
     const resizeObserver = new ResizeObserver(() => {
-      if (terminalContainerEl.clientWidth > 0 && terminalContainerEl.clientHeight > 0) {
-        fitAddon.fit();
+      if (terminalAreaEl.clientWidth > 0 && terminalAreaEl.clientHeight > 0) {
+        if (tabState.activeSessionId) {
+          const ss = tabState.sessions.get(tabState.activeSessionId);
+          if (ss) {
+            ss.fitAddon.fit();
+          }
+        }
       }
     });
-    resizeObserver.observe(terminalContainerEl);
+    resizeObserver.observe(terminalAreaEl);
+    tabState.resizeObserver = resizeObserver;
 
     // Tab bar item
     const tabEl = document.createElement("div");
@@ -338,39 +376,141 @@ export class TabManager {
     // Insert before the "+" button
     const addBtn = this.tabBarEl.querySelector(".tab-add-btn");
     this.tabBarEl.insertBefore(tabEl, addBtn);
-
-    const tabState: TabState = {
-      config: cfg,
-      terminal,
-      fitAddon,
-      sessionMgr,
-      containerEl,
-      terminalContainerEl,
-      tabEl,
-      status: "stopped",
-      ptyId: null,
-      unlistenData: null,
-      unlistenExit: null,
-      resizeObserver,
-      suppressResize: false,
-    };
-
-    // Register input/resize handlers ONCE per terminal (not per start)
-    terminal.onData((data) => {
-      if (tabState.ptyId) {
-        invoke("write_pty", { id: tabState.ptyId, data });
-      }
-    });
-    terminal.onResize(({ cols, rows }) => {
-      if (tabState.ptyId && !tabState.suppressResize) {
-        invoke("resize_pty", { id: tabState.ptyId, cols, rows });
-      }
-    });
+    tabState.tabEl = tabEl;
 
     this.tabs.set(cfg.id, tabState);
 
     if (activate) {
       this.activateTab(cfg.id);
+    }
+  }
+
+  // -----------------------------------------------------------------------
+  // Per-session terminal lifecycle
+  // -----------------------------------------------------------------------
+
+  /** Create a new Terminal + FitAddon for a session inside the tab's terminal area. */
+  private createSessionTerminal(tabId: string, sessionId: string): void {
+    const state = this.tabs.get(tabId);
+    if (!state) return;
+
+    // Create session-level terminal container
+    const containerEl = document.createElement("div");
+    containerEl.className = "terminal-container";
+    containerEl.dataset.sessionId = sessionId;
+
+    // Hide all other session containers
+    for (const [, ss] of state.sessions) {
+      ss.containerEl.style.display = "none";
+    }
+    containerEl.style.display = "block";
+    state.terminalAreaEl.appendChild(containerEl);
+
+    // Create xterm.js terminal for this session
+    const terminal = new Terminal({
+      cursorBlink: true,
+      fontSize: 14,
+      theme: { background: "#0a0a1a" },
+    });
+    const fitAddon = new FitAddon();
+    terminal.loadAddon(fitAddon);
+    terminal.open(containerEl);
+
+    const ss: SessionState = {
+      terminal,
+      fitAddon,
+      containerEl,
+      ptyId: null,
+      unlistenData: null,
+      unlistenExit: null,
+    };
+
+    // Register input handler — writes to this session's PTY
+    terminal.onData((data) => {
+      if (ss.ptyId) {
+        invoke("write_pty", { id: ss.ptyId, data });
+      }
+    });
+
+    // Register resize handler — resizes this session's PTY
+    terminal.onResize(({ cols, rows }) => {
+      if (ss.ptyId && !state.suppressResize) {
+        invoke("resize_pty", { id: ss.ptyId, cols, rows });
+      }
+    });
+
+    state.sessions.set(sessionId, ss);
+    state.activeSessionId = sessionId;
+
+    // Fit after next frame (container must be visible)
+    requestAnimationFrame(() => {
+      fitAddon.fit();
+    });
+  }
+
+  /** Destroy a session's terminal, kill its PTY, remove from DOM. */
+  private async destroySessionTerminal(tabId: string, sessionId: string): Promise<void> {
+    const state = this.tabs.get(tabId);
+    if (!state) return;
+
+    const ss = state.sessions.get(sessionId);
+    if (!ss) return;
+
+    // Kill PTY if running
+    if (ss.ptyId) {
+      try {
+        await invoke("kill_pty", { id: ss.ptyId });
+      } catch (_) {
+        // ignore
+      }
+      this.detachSessionPty(ss);
+    }
+
+    // Dispose terminal and remove container from DOM
+    ss.terminal.dispose();
+    ss.containerEl.remove();
+    state.sessions.delete(sessionId);
+  }
+
+  /** Switch visible session terminal (hide current, show target). */
+  private switchSessionTerminal(tabId: string, sessionId: string): void {
+    const state = this.tabs.get(tabId);
+    if (!state) return;
+
+    // Hide current active session's container
+    if (state.activeSessionId) {
+      const prevSs = state.sessions.get(state.activeSessionId);
+      if (prevSs) {
+        prevSs.containerEl.style.display = "none";
+      }
+    }
+
+    // If session doesn't have a terminal yet, create one
+    let ss = state.sessions.get(sessionId);
+    if (!ss) {
+      this.createSessionTerminal(tabId, sessionId);
+      ss = state.sessions.get(sessionId);
+    }
+
+    if (ss) {
+      ss.containerEl.style.display = "block";
+      state.activeSessionId = sessionId;
+
+      // Fit with suppressResize to avoid PTY resize clearing screen
+      state.suppressResize = true;
+      requestAnimationFrame(() => {
+        ss!.fitAddon.fit();
+        setTimeout(() => {
+          state.suppressResize = false;
+        }, 100);
+      });
+    }
+
+    // Update status based on active session's PTY state
+    if (ss?.ptyId) {
+      this.setStatus(tabId, "running");
+    } else {
+      this.setStatus(tabId, "stopped");
     }
   }
 
@@ -395,14 +535,23 @@ export class TabManager {
       state.tabEl.classList.add("tab-active");
       this.activeTabId = tabId;
       this.updateToolbar(state);
-      // Re-fit terminal after it becomes visible
-      requestAnimationFrame(() => {
-        state.fitAddon.fit();
-        // Re-enable resize after fit settles
-        setTimeout(() => {
+      // Re-fit active session's terminal after it becomes visible
+      if (state.activeSessionId) {
+        const ss = state.sessions.get(state.activeSessionId);
+        if (ss) {
+          requestAnimationFrame(() => {
+            ss.fitAddon.fit();
+            // Re-enable resize after fit settles
+            setTimeout(() => {
+              state.suppressResize = false;
+            }, 100);
+          });
+        } else {
           state.suppressResize = false;
-        }, 100);
-      });
+        }
+      } else {
+        state.suppressResize = false;
+      }
     }
   }
 
@@ -410,21 +559,24 @@ export class TabManager {
     const state = this.tabs.get(tabId);
     if (!state) return;
 
-    // Kill PTY if running
-    if (state.ptyId) {
-      try {
-        await invoke("kill_pty", { id: state.ptyId });
-      } catch (_) {
-        // ignore
+    // Kill ALL session PTYs and dispose ALL terminals
+    for (const [, ss] of state.sessions) {
+      if (ss.ptyId) {
+        try {
+          await invoke("kill_pty", { id: ss.ptyId });
+        } catch (_) {
+          // ignore
+        }
+        this.detachSessionPty(ss);
       }
-      this.detachPty(tabId);
+      ss.terminal.dispose();
     }
+    state.sessions.clear();
 
     // Cleanup
     if (state.resizeObserver) {
       state.resizeObserver.disconnect();
     }
-    state.terminal.dispose();
 
     // Remove DOM and session manager
     state.tabEl.remove();
