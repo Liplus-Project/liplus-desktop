@@ -261,8 +261,11 @@ export class TabManager {
     terminal.open(terminalContainerEl);
 
     // ResizeObserver to auto-fit terminal on container resize
+    // Guard against zero-dimension calls when tab is hidden (display:none)
     const resizeObserver = new ResizeObserver(() => {
-      fitAddon.fit();
+      if (terminalContainerEl.clientWidth > 0 && terminalContainerEl.clientHeight > 0) {
+        fitAddon.fit();
+      }
     });
     resizeObserver.observe(terminalContainerEl);
 
@@ -381,9 +384,10 @@ export class TabManager {
       this.activeTabId = tabId;
       this.updateToolbar(state);
       // Re-fit terminal after it becomes visible
-      setTimeout(() => {
+      // Use requestAnimationFrame to ensure layout is complete before fitting
+      requestAnimationFrame(() => {
         state.fitAddon.fit();
-      }, 50);
+      });
     }
   }
 
