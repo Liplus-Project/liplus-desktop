@@ -1,4 +1,3 @@
-import { ChatPane, SavedChatMessage } from "./chat";
 import { invoke } from "@tauri-apps/api/core";
 
 // ---------------------------------------------------------------------------
@@ -8,7 +7,7 @@ import { invoke } from "@tauri-apps/api/core";
 export interface SessionData {
   id: string;
   name: string;
-  messages: SavedChatMessage[];
+  messages: unknown[]; // kept for serialization compat, always empty for terminal mode
 }
 
 export interface TabSessions {
@@ -25,7 +24,6 @@ export class SessionManager {
   private tabId: string;
   private sessions: SessionData[] = [];
   private activeSessionId: string | null = null;
-  private chatPane: ChatPane;
   private sidebarEl: HTMLElement;
   private listEl: HTMLElement;
   private collapsed = false;
@@ -34,9 +32,8 @@ export class SessionManager {
   /** Callback when sessions change (for persistence). */
   onSessionsChange: (() => void) | null = null;
 
-  constructor(tabId: string, chatPane: ChatPane, parentEl: HTMLElement) {
+  constructor(tabId: string, parentEl: HTMLElement) {
     this.tabId = tabId;
-    this.chatPane = chatPane;
 
     // Build sidebar DOM
     this.sidebarEl = document.createElement("div");
@@ -73,12 +70,6 @@ export class SessionManager {
 
     // Insert sidebar as the first child of the parent container
     parentEl.insertBefore(this.sidebarEl, parentEl.firstChild);
-
-    // Auto-name session from first user message
-    this.chatPane.onUserMessage = (text: string) => {
-      this.autoNameFromFirstMessage(text);
-      this.notifyChange();
-    };
   }
 
   // -----------------------------------------------------------------------
@@ -92,12 +83,10 @@ export class SessionManager {
 
   /** Export session data for persistence. */
   exportData(): TabSessions {
-    // Save current chat state into the active session before export
-    this.saveCurrent();
     return {
       tab_id: this.tabId,
       active_session_id: this.activeSessionId,
-      sessions: this.sessions.map((s) => ({ ...s, messages: [...s.messages] })),
+      sessions: this.sessions.map((s) => ({ ...s, messages: [] })),
     };
   }
 
@@ -116,14 +105,6 @@ export class SessionManager {
     this.nextSessionNum = nums.length > 0 ? Math.max(...nums) + 1 : 1;
 
     this.renderList();
-
-    // Restore active session's messages
-    if (this.activeSessionId) {
-      const session = this.sessions.find((s) => s.id === this.activeSessionId);
-      if (session) {
-        this.chatPane.setMessages(session.messages);
-      }
-    }
   }
 
   /** Create a default session if none exist. */
@@ -147,24 +128,17 @@ export class SessionManager {
     const sessionName = name || `Session ${this.sessions.length + 1}`;
     const session: SessionData = { id, name: sessionName, messages: [] };
 
-    // Save current session's messages before switching
-    this.saveCurrent();
-
     this.sessions.push(session);
-    this.switchTo(id);
+    this.activeSessionId = id;
     this.renderList();
     this.notifyChange();
   }
 
   private switchTo(sessionId: string): void {
-    // Save current session before switching
-    this.saveCurrent();
-
     const session = this.sessions.find((s) => s.id === sessionId);
     if (!session) return;
 
     this.activeSessionId = sessionId;
-    this.chatPane.setMessages(session.messages);
     this.renderList();
   }
 
@@ -178,11 +152,10 @@ export class SessionManager {
       // Switch to the nearest session or create a new one
       if (this.sessions.length > 0) {
         const newIdx = Math.min(idx, this.sessions.length - 1);
-        this.activeSessionId = null; // prevent saveCurrent
+        this.activeSessionId = null;
         this.switchTo(this.sessions[newIdx].id);
       } else {
         this.activeSessionId = null;
-        this.chatPane.clear();
         this.createSession();
         return;
       }
@@ -201,30 +174,9 @@ export class SessionManager {
     }
   }
 
-  /** Auto-generate session name from the first user message. */
-  autoNameFromFirstMessage(text: string): void {
-    if (!this.activeSessionId) return;
-    const session = this.sessions.find((s) => s.id === this.activeSessionId);
-    if (!session) return;
-    // Only auto-name if the name is still the default pattern
-    if (/^Session \d+$/.test(session.name)) {
-      const truncated = text.length > 40 ? text.slice(0, 40) + "..." : text;
-      session.name = truncated;
-      this.renderList();
-    }
-  }
-
   // -----------------------------------------------------------------------
   // Internal helpers
   // -----------------------------------------------------------------------
-
-  private saveCurrent(): void {
-    if (!this.activeSessionId) return;
-    const session = this.sessions.find((s) => s.id === this.activeSessionId);
-    if (session) {
-      session.messages = this.chatPane.getMessages();
-    }
-  }
 
   private toggleSidebar(): void {
     this.collapsed = !this.collapsed;
