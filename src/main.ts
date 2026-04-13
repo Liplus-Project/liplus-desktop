@@ -1,3 +1,4 @@
+import "@xterm/xterm/css/xterm.css";
 import "./styles.css";
 import { TabManager, AppConfig } from "./tabs";
 import { saveAllSessions } from "./sessions";

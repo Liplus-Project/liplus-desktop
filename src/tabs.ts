@@ -1,6 +1,8 @@
-import { ChatPane } from "./chat";
+import { Terminal } from "@xterm/xterm";
+import { FitAddon } from "@xterm/addon-fit";
 import { SessionManager, loadAllSessions } from "./sessions";
 import { invoke } from "@tauri-apps/api/core";
+import { listen, UnlistenFn } from "@tauri-apps/api/event";
 
 // ---------------------------------------------------------------------------
 // Types — mirrors Rust TabConfig
@@ -27,11 +29,17 @@ export type AgentStatus = "stopped" | "running" | "error";
 
 interface TabState {
   config: TabConfig;
-  chat: ChatPane;
+  terminal: Terminal;
+  fitAddon: FitAddon;
   sessionMgr: SessionManager;
   containerEl: HTMLElement;
+  terminalContainerEl: HTMLElement;
   tabEl: HTMLElement;
   status: AgentStatus;
+  ptyId: string | null;
+  unlistenData: UnlistenFn | null;
+  unlistenExit: UnlistenFn | null;
+  resizeObserver: ResizeObserver | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -125,67 +133,71 @@ export class TabManager {
   async startTab(tabId: string): Promise<void> {
     const state = this.tabs.get(tabId);
     if (!state) return;
-    if (state.chat.getPtyId()) {
-      state.chat.appendStatusBanner("Already running");
-      return;
-    }
+    if (state.ptyId) return; // Already running
 
-    const { command, args, cwd, cli_kind } = state.config;
+    const { command, args, cwd } = state.config;
 
-    state.chat.clear();
+    // Clear terminal for fresh start
+    state.terminal.clear();
 
-    if (cli_kind === "codex") {
-      // Codex: message-per-process model.
-      // Don't start a process now — wait for the user to send a message.
-      state.chat.appendStatusBanner(`Li+ Desktop — ${state.config.name}. Type a message to start.`);
-      this.setStatus(tabId, "stopped");
-      // Wire up the per-message handler
-      state.chat.onCodexSend = async (prompt: string) => {
-        state.chat.appendStatusBanner("Running...");
-        this.setStatus(tabId, "running");
-        try {
-          const execArgs = ["exec", "--json", "--full-auto", "--skip-git-repo-check", ...args, prompt];
-          const id = await invoke<string>("spawn_stream_pipe", {
-            command,
-            args: execArgs,
-            cwd: cwd ?? null,
-            cliKind: cli_kind,
-          });
-          await state.chat.attach(id, () => {
-            this.setStatus(tabId, "stopped");
-          });
-        } catch (e) {
-          state.chat.appendStatusBanner(`Failed: ${e}`);
-          this.setStatus(tabId, "error");
-        }
-      };
-      return;
-    }
-
-    // Claude Code: persistent session via PTY
-    // --output-format stream-json for NDJSON output parsing
-    // No --input-format: interactive PTY mode accepts plain text stdin
-    const streamArgs = ["--output-format", "stream-json", "--verbose", ...args];
-
-    state.chat.appendStatusBanner(`Starting ${command}...`);
-    state.chat.onCodexSend = null;
-
+    // Spawn PTY — pass user's configured args only, no stream-json flags
     try {
-      const id = await invoke<string>("spawn_stream_pty", {
+      const cols = state.terminal.cols;
+      const rows = state.terminal.rows;
+      const id = await invoke<string>("spawn_pty", {
         command,
-        args: streamArgs,
-        cols: 120,
-        rows: 40,
+        args,
+        cols,
+        rows,
         cwd: cwd ?? null,
-        cliKind: cli_kind,
       });
 
+      state.ptyId = id;
       this.setStatus(tabId, "running");
-      await state.chat.attach(id, () => {
-        this.setStatus(tabId, "stopped");
+
+      // Listen for PTY output
+      state.unlistenData = await listen<string>(
+        `pty-data-${id}`,
+        (event) => {
+          state.terminal.write(event.payload);
+        },
+      );
+
+      // Listen for PTY exit
+      state.unlistenExit = await listen<number | null>(
+        `pty-exit-${id}`,
+        (event) => {
+          const code = event.payload;
+          const msg =
+            code !== null && code !== 0
+              ? `\r\n[Process exited with code ${code}]`
+              : "\r\n[Process exited]";
+          state.terminal.write(msg);
+          this.detachPty(tabId);
+          this.setStatus(tabId, "stopped");
+        },
+      );
+
+      // Forward user input to PTY
+      state.terminal.onData((data) => {
+        if (state.ptyId) {
+          invoke("write_pty", { id: state.ptyId, data });
+        }
       });
+
+      // Forward resize to PTY
+      state.terminal.onResize(({ cols, rows }) => {
+        if (state.ptyId) {
+          invoke("resize_pty", { id: state.ptyId, cols, rows });
+        }
+      });
+
+      // Initial fit after attach
+      setTimeout(() => {
+        state.fitAddon.fit();
+      }, 50);
     } catch (e) {
-      state.chat.appendStatusBanner(`Failed to start: ${e}`);
+      state.terminal.write(`\r\nFailed to start: ${e}\r\n`);
       this.setStatus(tabId, "error");
     }
   }
@@ -194,17 +206,34 @@ export class TabManager {
   async stopTab(tabId: string): Promise<void> {
     const state = this.tabs.get(tabId);
     if (!state) return;
-    const ptyId = state.chat.getPtyId();
-    if (!ptyId) return;
+    if (!state.ptyId) return;
 
     try {
-      await invoke("kill_pty", { id: ptyId });
-      state.chat.appendStatusBanner("Stopped");
+      await invoke("kill_pty", { id: state.ptyId });
+      state.terminal.write("\r\n[Stopped]");
       this.setStatus(tabId, "stopped");
     } catch (e) {
-      state.chat.appendStatusBanner(`Stop failed: ${e}`);
+      state.terminal.write(`\r\n[Stop failed: ${e}]`);
     }
-    state.chat.detach();
+    this.detachPty(tabId);
+  }
+
+  // -----------------------------------------------------------------------
+  // PTY lifecycle helpers
+  // -----------------------------------------------------------------------
+
+  private detachPty(tabId: string): void {
+    const state = this.tabs.get(tabId);
+    if (!state) return;
+    state.ptyId = null;
+    if (state.unlistenData) {
+      state.unlistenData();
+      state.unlistenData = null;
+    }
+    if (state.unlistenExit) {
+      state.unlistenExit();
+      state.unlistenExit = null;
+    }
   }
 
   // -----------------------------------------------------------------------
@@ -212,32 +241,44 @@ export class TabManager {
   // -----------------------------------------------------------------------
 
   private createTab(cfg: TabConfig, activate: boolean): void {
-    // Tab content wrapper (hidden by default) — flex row for sidebar + chat
+    // Tab content wrapper (hidden by default) — flex row for sidebar + terminal
     const containerEl = document.createElement("div");
     containerEl.className = "tab-content";
     containerEl.dataset.tabId = cfg.id;
     containerEl.style.display = "none";
     this.contentAreaEl.appendChild(containerEl);
 
-    // Chat area (right side of the flex row)
-    const chatArea = document.createElement("div");
-    chatArea.className = "tab-chat-area";
-    containerEl.appendChild(chatArea);
+    // Terminal container (right side of the flex row)
+    const terminalContainerEl = document.createElement("div");
+    terminalContainerEl.className = "terminal-container";
+    containerEl.appendChild(terminalContainerEl);
 
-    // ChatPane builds its DOM inside the chat area
-    const chat = new ChatPane(chatArea);
-    chat.appendStatusBanner(
-      `Li+ Desktop \u2014 ${cfg.name} tab. Press Start to launch.`,
-    );
+    // Create xterm.js terminal
+    const terminal = new Terminal({
+      cursorBlink: true,
+      fontSize: 14,
+      theme: { background: "#0a0a1a" },
+    });
+    const fitAddon = new FitAddon();
+    terminal.loadAddon(fitAddon);
 
-    // SessionManager builds sidebar and inserts it before chatArea in the container
-    const sessionMgr = new SessionManager(cfg.id, chat, containerEl);
+    // SessionManager builds sidebar and inserts it before terminalContainerEl
+    const sessionMgr = new SessionManager(cfg.id, containerEl);
     sessionMgr.onSessionsChange = () => {
       if (this.onSessionsChange) {
         this.onSessionsChange();
       }
     };
     this.sessionManagers.set(cfg.id, sessionMgr);
+
+    // Open terminal into the container element
+    terminal.open(terminalContainerEl);
+
+    // ResizeObserver to auto-fit terminal on container resize
+    const resizeObserver = new ResizeObserver(() => {
+      fitAddon.fit();
+    });
+    resizeObserver.observe(terminalContainerEl);
 
     // Tab bar item
     const tabEl = document.createElement("div");
@@ -302,11 +343,17 @@ export class TabManager {
 
     this.tabs.set(cfg.id, {
       config: cfg,
-      chat,
+      terminal,
+      fitAddon,
       sessionMgr,
       containerEl,
+      terminalContainerEl,
       tabEl,
       status: "stopped",
+      ptyId: null,
+      unlistenData: null,
+      unlistenExit: null,
+      resizeObserver,
     });
 
     if (activate) {
@@ -333,6 +380,10 @@ export class TabManager {
       state.tabEl.classList.add("tab-active");
       this.activeTabId = tabId;
       this.updateToolbar(state);
+      // Re-fit terminal after it becomes visible
+      setTimeout(() => {
+        state.fitAddon.fit();
+      }, 50);
     }
   }
 
@@ -341,15 +392,20 @@ export class TabManager {
     if (!state) return;
 
     // Kill PTY if running
-    const ptyId = state.chat.getPtyId();
-    if (ptyId) {
+    if (state.ptyId) {
       try {
-        await invoke("kill_pty", { id: ptyId });
+        await invoke("kill_pty", { id: state.ptyId });
       } catch (_) {
         // ignore
       }
-      state.chat.detach();
+      this.detachPty(tabId);
     }
+
+    // Cleanup
+    if (state.resizeObserver) {
+      state.resizeObserver.disconnect();
+    }
+    state.terminal.dispose();
 
     // Remove DOM and session manager
     state.tabEl.remove();
