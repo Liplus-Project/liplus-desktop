@@ -40,6 +40,7 @@ interface TabState {
   unlistenData: UnlistenFn | null;
   unlistenExit: UnlistenFn | null;
   resizeObserver: ResizeObserver | null;
+  suppressResize: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -351,6 +352,7 @@ export class TabManager {
       unlistenData: null,
       unlistenExit: null,
       resizeObserver,
+      suppressResize: false,
     };
 
     // Register input/resize handlers ONCE per terminal (not per start)
@@ -360,7 +362,7 @@ export class TabManager {
       }
     });
     terminal.onResize(({ cols, rows }) => {
-      if (tabState.ptyId) {
+      if (tabState.ptyId && !tabState.suppressResize) {
         invoke("resize_pty", { id: tabState.ptyId, cols, rows });
       }
     });
@@ -387,14 +389,19 @@ export class TabManager {
     // Activate new
     const state = this.tabs.get(tabId);
     if (state) {
+      // Suppress resize_pty during tab activation to prevent CLI screen clear
+      state.suppressResize = true;
       state.containerEl.style.display = "flex";
       state.tabEl.classList.add("tab-active");
       this.activeTabId = tabId;
       this.updateToolbar(state);
       // Re-fit terminal after it becomes visible
-      // Use requestAnimationFrame to ensure layout is complete before fitting
       requestAnimationFrame(() => {
         state.fitAddon.fit();
+        // Re-enable resize after fit settles
+        setTimeout(() => {
+          state.suppressResize = false;
+        }, 100);
       });
     }
   }
