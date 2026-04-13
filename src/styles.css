@@ -291,13 +291,8 @@
 }
 
 .session-sidebar-collapsed {
-  width: 0;
-  min-width: 0;
-  border-right: none;
-}
-
-.session-sidebar-collapsed .session-sidebar-header {
-  /* Keep header visible via absolute positioning when collapsed */
+  width: 40px;
+  min-width: 40px;
 }
 
 .session-sidebar-collapsed .session-list,

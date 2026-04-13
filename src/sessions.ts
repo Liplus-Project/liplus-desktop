@@ -32,6 +32,9 @@ export class SessionManager {
   /** Callback when sessions change (for persistence). */
   onSessionsChange: (() => void) | null = null;
 
+  /** Callback when user switches to a different session. */
+  onSessionSwitch: ((sessionId: string) => void) | null = null;
+
   constructor(tabId: string, parentEl: HTMLElement) {
     this.tabId = tabId;
 
@@ -140,6 +143,11 @@ export class SessionManager {
 
     this.activeSessionId = sessionId;
     this.renderList();
+
+    // Notify tab manager to restart PTY for the new session
+    if (this.onSessionSwitch) {
+      this.onSessionSwitch(sessionId);
+    }
   }
 
   private deleteSession(sessionId: string): void {
