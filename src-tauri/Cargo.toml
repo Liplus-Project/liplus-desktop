@@ -1,6 +1,6 @@
 [package]
 name = "liplus-desktop"
-version = "0.2.4"
+version = "0.2.5"
 description = "Multi-agent desktop for Li+ language"
 authors = ["Liplus Project Contributors"]
 edition = "2021"
