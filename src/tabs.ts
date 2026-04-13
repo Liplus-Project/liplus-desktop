@@ -178,20 +178,6 @@ export class TabManager {
         },
       );
 
-      // Forward user input to PTY
-      state.terminal.onData((data) => {
-        if (state.ptyId) {
-          invoke("write_pty", { id: state.ptyId, data });
-        }
-      });
-
-      // Forward resize to PTY
-      state.terminal.onResize(({ cols, rows }) => {
-        if (state.ptyId) {
-          invoke("resize_pty", { id: state.ptyId, cols, rows });
-        }
-      });
-
       // Initial fit after attach
       setTimeout(() => {
         state.fitAddon.fit();
@@ -341,7 +327,7 @@ export class TabManager {
     const addBtn = this.tabBarEl.querySelector(".tab-add-btn");
     this.tabBarEl.insertBefore(tabEl, addBtn);
 
-    this.tabs.set(cfg.id, {
+    const tabState: TabState = {
       config: cfg,
       terminal,
       fitAddon,
@@ -354,7 +340,21 @@ export class TabManager {
       unlistenData: null,
       unlistenExit: null,
       resizeObserver,
+    };
+
+    // Register input/resize handlers ONCE per terminal (not per start)
+    terminal.onData((data) => {
+      if (tabState.ptyId) {
+        invoke("write_pty", { id: tabState.ptyId, data });
+      }
     });
+    terminal.onResize(({ cols, rows }) => {
+      if (tabState.ptyId) {
+        invoke("resize_pty", { id: tabState.ptyId, cols, rows });
+      }
+    });
+
+    this.tabs.set(cfg.id, tabState);
 
     if (activate) {
       this.activateTab(cfg.id);
