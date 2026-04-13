@@ -162,8 +162,10 @@ export class TabManager {
       return;
     }
 
-    // Claude Code: persistent session via PTY + stream-json
-    const streamArgs = ["--output-format", "stream-json", "--input-format", "stream-json", "--verbose", ...args];
+    // Claude Code: persistent session via PTY
+    // --output-format stream-json for NDJSON output parsing
+    // No --input-format: interactive PTY mode accepts plain text stdin
+    const streamArgs = ["--output-format", "stream-json", "--verbose", ...args];
 
     state.chat.appendStatusBanner(`Starting ${command}...`);
     state.chat.onCodexSend = null;
