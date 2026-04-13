@@ -35,6 +35,12 @@ export class SessionManager {
   /** Callback when user switches to a different session. */
   onSessionSwitch: ((sessionId: string) => void) | null = null;
 
+  /** Callback when a new session is created. */
+  onSessionCreate: ((sessionId: string) => void) | null = null;
+
+  /** Callback when a session is about to be deleted. */
+  onSessionDelete: ((sessionId: string) => void) | null = null;
+
   constructor(tabId: string, parentEl: HTMLElement) {
     this.tabId = tabId;
 
@@ -134,6 +140,7 @@ export class SessionManager {
     this.sessions.push(session);
     this.activeSessionId = id;
     this.renderList();
+    this.onSessionCreate?.(id);
     this.notifyChange();
   }
 
@@ -154,6 +161,7 @@ export class SessionManager {
     const idx = this.sessions.findIndex((s) => s.id === sessionId);
     if (idx < 0) return;
 
+    this.onSessionDelete?.(sessionId);
     this.sessions.splice(idx, 1);
 
     if (this.activeSessionId === sessionId) {
