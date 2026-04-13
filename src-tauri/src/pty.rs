@@ -3,7 +3,9 @@ use portable_pty::{CommandBuilder, NativePtySystem, PtySize, PtySystem};
 use serde_json;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use tauri::{AppHandle, Emitter};
 use uuid::Uuid;
 
@@ -305,6 +307,29 @@ pub fn spawn_stream_pty(
         // ── Phase 1: Auto-confirm interactive prompts ──
         // Read byte-by-byte, detect prompts, send Enter.
         // Transition when we see the first JSON line.
+
+        // Timer-based auto-confirm: Ink UI renders without newline characters,
+        // so the byte-by-byte pattern matching may never fire. This timer
+        // thread periodically sends Enter (\r) to dismiss any confirmation
+        // prompts during Phase 1 init. (#57)
+        let init_done = Arc::new(AtomicBool::new(false));
+        let init_done_timer = Arc::clone(&init_done);
+        let procs_for_timer = Arc::clone(&procs_clone);
+        let id_for_timer = id_clone2.clone();
+        std::thread::spawn(move || {
+            for _ in 0..15 {
+                std::thread::sleep(Duration::from_secs(2));
+                if init_done_timer.load(Ordering::Relaxed) {
+                    return;
+                }
+                let mut map = procs_for_timer.lock();
+                if let Some(ProcessInstance::Pty(pty)) = map.get_mut(&id_for_timer) {
+                    let _ = pty.writer.write_all(b"\r");
+                    let _ = pty.writer.flush();
+                }
+            }
+        });
+
         let mut init_buf = Vec::with_capacity(8192);
         let mut byte = [0u8; 1];
         let mut json_start = None;
@@ -324,7 +349,8 @@ pub fn spawn_stream_pty(
                         // Detect JSON start → transition to Phase 2
                         if trimmed.starts_with('{') {
                             if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
-                                // Found first JSON line, process it and switch to Phase 2
+                                // Found first JSON line, stop timer thread and switch to Phase 2
+                                init_done.store(true, Ordering::Relaxed);
                                 json_start = Some(v);
                                 break 'init;
                             }
