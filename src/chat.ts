@@ -401,17 +401,10 @@ export class ChatPane {
       this.onUserMessage(text);
     }
 
-    // Send to stdin as stream-json formatted message
-    // Claude Code --input-format stream-json expects: {"type":"user","message":{"role":"user","content":[{"type":"text","text":"..."}]}}
-    const streamMsg = JSON.stringify({
-      type: "user",
-      message: {
-        role: "user",
-        content: [{ type: "text", text }],
-      },
-    });
+    // Send plain text to PTY stdin (interactive mode — no stream-json input)
+    // The Ink UI receives this as keyboard input followed by Enter.
     try {
-      await invoke("write_pty", { id: this.ptyId, data: streamMsg + "\n" });
+      await invoke("write_pty", { id: this.ptyId, data: text + "\r" });
     } catch (e) {
       this.appendStatusBanner(`Send failed: ${e}`);
     }

@@ -197,11 +197,14 @@ pub fn kill_pty(state: tauri::State<PtyState>, id: String) -> Result<(), String>
     Ok(())
 }
 
-/// Spawn a CLI process in stream-json mode using a real PTY.
+/// Spawn a CLI process in interactive PTY mode with NDJSON output parsing.
 ///
 /// Uses a PTY so the CLI detects a terminal and shows interactive prompts
-/// (trust confirmation, channel development warning, etc.). The reader thread
-/// operates in two phases:
+/// (trust confirmation, channel development warning, etc.). Output is parsed
+/// as NDJSON via `--output-format stream-json`. User input is sent as plain
+/// text + carriage return (interactive mode, no `--input-format`).
+///
+/// The reader thread operates in two phases:
 ///
 /// **Phase 1 (Init):** Read raw PTY output byte-by-byte, accumulating into a
 /// line buffer. Confirmation prompts from Ink UI are auto-accepted by sending
@@ -209,9 +212,8 @@ pub fn kill_pty(state: tauri::State<PtyState>, id: String) -> Result<(), String>
 /// transition to Phase 2.
 ///
 /// **Phase 2 (Stream):** Read line-by-line, strip ANSI escapes, parse NDJSON,
-/// and emit `chat-message-{id}` Tauri events — same as the old pipe mode.
-///
-/// User input is sent as stream-json via `write_pty`.
+/// and emit `chat-message-{id}` Tauri events. PTY echo lines (user input
+/// echoed back) are silently dropped as they fail JSON parsing.
 #[tauri::command]
 pub fn spawn_stream_pty(
     app: AppHandle,
@@ -361,6 +363,9 @@ pub fn spawn_stream_pty(
 
         // ── Phase 2: Stream NDJSON (or ANSI in interactive/Channel mode) ──
         // Wrap reader in BufReader for line-by-line reading.
+        // Note: PTY echo lines (user input echoed back by the terminal) are
+        // plain text and will fail JSON parsing in parse_ndjson_line, so they
+        // are silently dropped. No explicit filtering needed.
         let buf_reader = BufReader::new(reader);
         for line in buf_reader.lines() {
             match line {
