@@ -255,6 +255,14 @@ export class TabManager {
         this.onSessionsChange();
       }
     };
+    sessionMgr.onSessionSwitch = (_sessionId: string) => {
+      // Restart PTY: stop current, clear terminal, start fresh
+      this.stopTab(cfg.id).then(() => {
+        const st = this.tabs.get(cfg.id);
+        if (st) st.terminal.clear();
+        this.startTab(cfg.id);
+      });
+    };
     this.sessionManagers.set(cfg.id, sessionMgr);
 
     // Open terminal into the container element
