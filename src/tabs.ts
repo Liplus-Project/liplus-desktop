@@ -34,6 +34,7 @@ interface SessionState {
   ptyId: string | null;
   unlistenData: UnlistenFn | null;
   unlistenExit: UnlistenFn | null;
+  restored: boolean; // true = loaded from previous session, consumed on first start
 }
 
 // ---------------------------------------------------------------------------
@@ -122,12 +123,13 @@ export class TabManager {
 
     // For restored sessions (from importData), create terminals for the active session
     // importData does not fire onSessionCreate, so terminals must be created here
+    // Mark as restored so startTab() can inject --continue for Claude sessions
     for (const [tabId, state] of this.tabs) {
       const mgr = this.sessionManagers.get(tabId);
       if (mgr) {
         const activeId = mgr.getActiveSessionId();
         if (activeId && !state.sessions.has(activeId)) {
-          this.createSessionTerminal(tabId, activeId);
+          this.createSessionTerminal(tabId, activeId, true);
         }
       }
     }
@@ -163,7 +165,20 @@ export class TabManager {
     if (!ss) return;
     if (ss.ptyId) return; // Already running
 
-    const { command, args, cwd } = state.config;
+    const { command, args: baseArgs, cwd, cli_kind } = state.config;
+
+    // Build args — inject --continue for restored Claude sessions
+    let args = [...baseArgs];
+    if (ss.restored && cli_kind === "claude") {
+      const hasContinue = args.some(
+        (a) => a === "--continue" || a === "-c",
+      );
+      if (!hasContinue) {
+        args.push("--continue");
+      }
+    }
+    // Consume the restored flag — subsequent starts won't re-add --continue
+    ss.restored = false;
 
     // Clear terminal for fresh start
     ss.terminal.clear();
@@ -390,7 +405,7 @@ export class TabManager {
   // -----------------------------------------------------------------------
 
   /** Create a new Terminal + FitAddon for a session inside the tab's terminal area. */
-  private createSessionTerminal(tabId: string, sessionId: string): void {
+  private createSessionTerminal(tabId: string, sessionId: string, restored = false): void {
     const state = this.tabs.get(tabId);
     if (!state) return;
 
@@ -423,6 +438,7 @@ export class TabManager {
       ptyId: null,
       unlistenData: null,
       unlistenExit: null,
+      restored,
     };
 
     // Register input handler — writes to this session's PTY
@@ -486,9 +502,10 @@ export class TabManager {
     }
 
     // If session doesn't have a terminal yet, create one
+    // (lazy creation = imported session that wasn't initially active → mark restored)
     let ss = state.sessions.get(sessionId);
     if (!ss) {
-      this.createSessionTerminal(tabId, sessionId);
+      this.createSessionTerminal(tabId, sessionId, true);
       ss = state.sessions.get(sessionId);
     }
 
