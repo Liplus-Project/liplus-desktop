@@ -2,6 +2,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { SessionManager, loadAllSessions } from "./sessions";
 import { invoke } from "@tauri-apps/api/core";
+import { readText } from "@tauri-apps/plugin-clipboard-manager";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
 
 // ---------------------------------------------------------------------------
@@ -446,6 +447,32 @@ export class TabManager {
       if (ss.ptyId) {
         invoke("write_pty", { id: ss.ptyId, data });
       }
+    });
+
+    // Paste handler — Ctrl+V / Ctrl+Shift+V reads the clipboard and writes it to
+    // the PTY. xterm.js has no built-in paste wiring here, and the Tauri webview
+    // does not surface a native paste event to the terminal, so paste is bridged
+    // explicitly via the clipboard plugin.
+    terminal.attachCustomKeyEventHandler((e) => {
+      if (
+        e.type === "keydown" &&
+        (e.ctrlKey || e.metaKey) &&
+        !e.altKey &&
+        (e.key === "v" || e.key === "V")
+      ) {
+        // Suppress the webview's native paste so the text is not also delivered
+        // through xterm's own paste path (which would double the input).
+        e.preventDefault();
+        readText()
+          .then((text) => {
+            if (text && ss.ptyId) {
+              invoke("write_pty", { id: ss.ptyId, data: text });
+            }
+          })
+          .catch((err) => console.error("paste failed:", err));
+        return false;
+      }
+      return true;
     });
 
     // Register resize handler — resizes this session's PTY
